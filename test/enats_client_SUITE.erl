@@ -124,10 +124,12 @@ t_flush_concurrency(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     Parent = self(),
-    spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 2000)} end),
+    spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 10000)} end),
     receive {fake_flush_received, Server} -> ok after 1000 -> ct:fail(first_flush_not_received) end,
-    ?assertEqual({error, flush_in_progress}, enats_client:flush(Client, 2000)),
-    receive {first_flush, ok} -> ok after 2000 -> ct:fail(first_flush_not_completed) end,
+    timer:sleep(50),
+    ?assertEqual({error, flush_in_progress}, enats_client:flush(Client, 10000)),
+    Server ! release_flush,
+    receive {first_flush, ok} -> ok after 10000 -> ct:fail(first_flush_not_completed) end,
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
@@ -547,14 +549,14 @@ fake_server(Parent, Mode) ->
                     timer:sleep(500);
                 coalesced_flush ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\nPING\r\n">>),
-                    _ = gen_tcp:recv(Socket, 0, 1000),
-                    _ = gen_tcp:recv(Socket, 0, 1000),
-                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
+                    {ok, _ClientData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    timer:sleep(500);
                 flush_concurrent ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, _FlushData} = gen_tcp:recv(Socket, 0, 1000),
                     Parent ! {fake_flush_received, self()},
-                    timer:sleep(500),
+                    receive release_flush -> ok end,
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
                 flush_timeout ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
