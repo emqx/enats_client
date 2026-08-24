@@ -1,9 +1,10 @@
 -module(enats_client).
--export([start_link/1, connect/1, disconnect/1, stop/1, status/1, info/1,
+-export([start_link/1, connect/1, connect/2, disconnect/1, stop/1, status/1, info/1,
     publish/3, publish/4, subscribe/3, unsubscribe/2, flush/2]).
 start_link(Options) ->
     enats_connection:start_link(Options#{owner => maps:get(owner, Options, self())}).
 connect(Client) -> enats_connection:connect(Client).
+connect(Client, Timeout) -> enats_connection:connect(Client, Timeout).
 disconnect(Client) -> enats_connection:disconnect(Client).
 stop(Client) -> enats_connection:stop(Client).
 status(Client) -> enats_connection:status(Client).
