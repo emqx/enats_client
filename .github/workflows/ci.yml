@@ -22,9 +22,9 @@ jobs:
         run: |
           version=2.11.6
           curl --fail --silent --show-error --location \
-            "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.zip" \
-            --output /tmp/nats-server.zip
-          unzip -q /tmp/nats-server.zip -d /tmp
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.tar.gz" \
+            --output /tmp/nats-server.tar.gz
+          tar -xzf /tmp/nats-server.tar.gz -C /tmp
           echo "/tmp/nats-server-v${version}-linux-amd64" >> "$GITHUB_PATH"
       - run: make compile
       - run: make test
