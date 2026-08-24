@@ -23,15 +23,20 @@ all() ->
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
-    PrivDir = proplists:get_value(priv_dir, Config),
-    Port = dynamic_port(),
-    PidFile = filename:join(PrivDir, "nats-base.pid"),
-    Server = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port), "-P", PidFile]),
-    wait_for_port(Port),
-    [{port, Port}, {base_server, Server}, {base_pid_file, PidFile} | Config].
+    case nats_server_executable() of
+        {ok, _Executable} ->
+            PrivDir = proplists:get_value(priv_dir, Config),
+            Port = dynamic_port(),
+            PidFile = filename:join(PrivDir, "nats-base.pid"),
+            Server = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port), "-P", PidFile]),
+            wait_for_port(Port),
+            [{port, Port}, {base_server, Server}, {base_pid_file, PidFile} | Config];
+        unavailable ->
+            [{port, 4222}, {base_server, undefined}, {base_pid_file, undefined} | Config]
+    end.
 
 end_per_suite(Config) ->
-    stop_nats_server(?config(base_server, Config), ?config(base_pid_file, Config)),
+    maybe_stop_nats_server(?config(base_server, Config), ?config(base_pid_file, Config)),
     ok.
 
 t_frame_fragmentation(_Config) ->
@@ -301,6 +306,12 @@ t_server_failover(Config) ->
     ok = enats_client:stop(Client).
 
 t_nkey_nats_server(Config) ->
+    case nats_server_executable() of
+        unavailable -> {skip, "nats-server executable is unavailable"};
+        {ok, _} -> t_nkey_nats_server_impl(Config)
+    end.
+
+t_nkey_nats_server_impl(Config) ->
     {PublicKey, PrivateKey} = crypto:generate_key(eddsa, ed25519),
     PublicNKey = enats_nkey:encode_public(PublicKey),
     Port = dynamic_port(),
@@ -329,6 +340,12 @@ t_nkey_nats_server(Config) ->
     stop_nats_server(NatsServer, PidFile).
 
 t_token_nats_server(Config) ->
+    case nats_server_executable() of
+        unavailable -> {skip, "nats-server executable is unavailable"};
+        {ok, _} -> t_token_nats_server_impl(Config)
+    end.
+
+t_token_nats_server_impl(Config) ->
     Port = dynamic_port(),
     PidFile = filename:join(?config(priv_dir, Config), "nats-token.pid"),
     NatsServer = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port), "-P", PidFile, "--auth", "token"]),
@@ -346,7 +363,7 @@ start_nats_server(ConfigFile, PidFile) ->
     start_nats_process(["-DV", "-P", PidFile, "-c", ConfigFile]).
 
 start_nats_process(Args) ->
-    Executable = os:find_executable("nats-server"),
+    {ok, Executable} = nats_server_executable(),
     Port = open_port({spawn_executable, Executable},
         [{args, Args}, exit_status, use_stdio, stderr_to_stdout]),
     timer:sleep(200),
@@ -389,6 +406,19 @@ stop_nats_server(Port, PidFile) ->
     catch port_close(Port),
     _ = file:delete(PidFile),
     ok.
+
+maybe_stop_nats_server(undefined, undefined) -> ok;
+maybe_stop_nats_server(Port, PidFile) -> stop_nats_server(Port, PidFile).
+
+nats_server_executable() ->
+    case os:getenv("ENATS_USE_NATS_SERVICE") of
+        "true" -> unavailable;
+        _ ->
+            case os:find_executable("nats-server") of
+                false -> unavailable;
+                Executable -> {ok, Executable}
+            end
+    end.
 
 start_fake_server(Mode) ->
     Parent = self(),
