@@ -18,6 +18,14 @@ jobs:
         with:
           otp-version: "27"
           rebar3-version: "3"
+      - name: Install nats-server
+        run: |
+          version=2.11.6
+          curl --fail --silent --show-error --location \
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.zip" \
+            --output /tmp/nats-server.zip
+          unzip -q /tmp/nats-server.zip -d /tmp
+          echo "/tmp/nats-server-v${version}-linux-amd64" >> "$GITHUB_PATH"
       - run: make compile
       - run: make test
       - run: make coverage

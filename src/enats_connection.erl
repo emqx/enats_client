@@ -34,7 +34,8 @@ init(Options0) ->
         subscriptions => #{},
         next_sid => 1,
         servers => maps:get(servers, Options),
-        server_index => 1
+        server_index => 1,
+        current_server => undefined
     }}.
 
 disconnected({call, From}, connect, State) ->
@@ -78,13 +79,18 @@ waiting_pong(_, _, State) -> keep(State).
 
 connected({call, From}, status, _State) -> reply(From, connected);
 connected({call, From}, info, State) -> reply(From, maps:get(server_info, State));
+connected({call, From}, connect, _State) -> reply(From, {error, already_connected});
 connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
     case enats_subject:validate_publish(Subject) of
         ok ->
             Payload = iolist_to_binary(Payload0),
-            case send_frame(publish_frame(Subject, Payload, Options), State) of
-                ok -> reply(From, ok);
-                {error, Reason} -> lost_with_reply(From, Reason, State)
+            case validate_publish_options(Payload, Options, State) of
+                ok ->
+                    case send_frame(publish_frame(Subject, Payload, Options), State) of
+                        ok -> reply(From, ok);
+                        {error, Reason} -> lost_with_reply(From, Reason, State)
+                    end;
+                {error, Reason} -> reply(From, {error, Reason})
             end;
         {error, Reason} -> reply(From, {error, {invalid_subject, Reason}})
     end;
@@ -113,6 +119,8 @@ connected({call, From}, {unsubscribe, Ref}, State) ->
             end;
         error -> reply(From, {error, not_found})
     end;
+connected({call, From}, {flush, _Timeout}, #{flush_from := Existing}) when Existing =/= undefined ->
+    reply(From, {error, flush_in_progress});
 connected({call, From}, {flush, Timeout}, State) ->
     case send_frame(ping, State) of
         ok -> {keep_state, State#{flush_from => From}, [{state_timeout, Timeout, flush_timeout}]};
@@ -122,6 +130,7 @@ connected(state_timeout, flush_timeout, #{flush_from := undefined} = State) -> k
 connected(state_timeout, flush_timeout, #{flush_from := From} = State) ->
     {keep_state, State#{flush_from => undefined}, reply_action(From, {error, timeout})};
 connected({call, From}, disconnect, State) ->
+    reply_flush(State, {error, disconnected}),
     close(State), notify(State, disconnected, requested),
     {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
 connected(info, {tcp, Socket, Data}, #{socket := {tcp, Socket}} = State) -> process_data(Data, connected, State);
@@ -150,9 +159,11 @@ process_frames([], _StateName, State) -> keep(State);
 process_frames([Frame | Rest], StateName, State0) ->
     case process_frame(Frame, StateName, State0) of
         {next_state, NewName, State1, Actions} when Rest =:= [] -> {next_state, NewName, State1, Actions};
-        {next_state, NewName, State1, _Actions} -> process_frames(Rest, NewName, State1);
+        {next_state, NewName, State1, Actions} ->
+            append_transition(process_frames(Rest, NewName, State1), NewName, Actions);
         {keep_state, State1, Actions} when Rest =:= [] -> {keep_state, State1, Actions};
-        {keep_state, State1, _Actions} -> process_frames(Rest, StateName, State1)
+        {keep_state, State1, Actions} ->
+            append_actions(process_frames(Rest, StateName, State1), Actions)
     end.
 
 process_frame({info, RawInfo}, waiting_info, State) ->
@@ -179,6 +190,12 @@ process_frame(#{type := hmsg} = Message, connected, State) -> deliver(Message, S
 process_frame(ok, _StateName, State) -> {keep_state, State, []};
 process_frame(_Frame, _StateName, State) -> {keep_state, State, []}.
 
+append_actions({keep_state, State, Later}, Actions) -> {keep_state, State, Actions ++ Later};
+append_actions({next_state, Name, State, Later}, Actions) -> {next_state, Name, State, Actions ++ Later}.
+
+append_transition({keep_state, State, Later}, Name, Actions) -> {next_state, Name, State, Actions ++ Later};
+append_transition({next_state, Name, State, Later}, _OldName, Actions) -> {next_state, Name, State, Actions ++ Later}.
+
 process_connect_info(Info, Base, State) ->
     case enats_auth:connect_params(maps:get(auth, maps:get(options, State)), Info, Base) of
         {ok, Params} ->
@@ -200,7 +217,7 @@ open_socket(State, Attempts, Options) ->
     Index = maps:get(server_index, State),
     {Host, Port} = lists:nth(Index, Servers),
     NextIndex = next_server_index(Index, length(Servers)),
-    State1 = State#{server_index => NextIndex},
+    State1 = State#{server_index => NextIndex, current_server => {Host, Port}},
     Timeout = maps:get(connect_timeout, Options),
     case tcp_result(gen_tcp:connect(Host, Port, [binary, {active, true}, {nodelay, true}], Timeout)) of
         {ok, Socket} -> {ok, Socket, State1};
@@ -210,12 +227,12 @@ open_socket(State, Attempts, Options) ->
 
 tcp_result({ok, Socket}) -> {ok, {tcp, Socket}};
 tcp_result(Error) -> Error.
-maybe_upgrade_tls(Info, #{socket := {tcp, Socket}, options := Options} = State) ->
+maybe_upgrade_tls(Info, #{socket := {tcp, Socket}, options := Options, current_server := {Host, _Port}} = State) ->
     case maps:get(tls, Options) andalso maps:get(tls_required, Info, false) of
         false -> {ok, State};
         true ->
             _ = inet:setopts(Socket, [{active, false}]),
-            SslOpts = [{active, true}, {server_name_indication, maps:get(host, Options)} |
+            SslOpts = [{active, true}, {server_name_indication, Host} |
                 maps:get(ssl_opts, Options)],
             case ssl:connect(Socket, SslOpts, maps:get(connect_timeout, Options)) of
                 {ok, SslSocket} -> {ok, State#{socket => {ssl, SslSocket}}};
@@ -242,6 +259,19 @@ publish_frame(Subject, Payload, Options) ->
         Headers -> {hpub, Subject, maps:get(reply_to, Options, undefined), Headers, Payload}
     end.
 
+validate_publish_options(Payload, Options, State) ->
+    Info = maps:get(server_info, State),
+    MaxPayload = maps:get(max_payload, Info, infinity),
+    Headers = maps:get(headers, Options, []),
+    case is_integer(MaxPayload) andalso byte_size(Payload) > MaxPayload of
+        true -> {error, {payload_too_large, MaxPayload}};
+        false ->
+            case Headers =/= [] andalso maps:get(headers, Info, true) =:= false of
+                true -> {error, headers_not_supported};
+                false -> ok
+            end
+    end.
+
 restore_subscriptions(State) ->
     maps:foreach(fun(_Ref, #{subject := Subject, sid := Sid, queue_group := Queue}) ->
         _ = send_frame({sub, Subject, Sid, Queue}, State)
@@ -257,6 +287,7 @@ deliver(Message, State) ->
 lost(_StateName, Reason, State) ->
     close(State),
     reply_connect(State, {error, Reason}),
+    reply_flush(State, {error, {disconnected, Reason}}),
     notify(State, disconnected, Reason),
     case maps:get(reconnect, maps:get(options, State)) of
         false -> {next_state, disconnected, clear_socket(State), []};
@@ -268,6 +299,8 @@ lost_with_reply(From, Reason, State) ->
 
 reply_connect(#{connect_from := undefined}, _Reply) -> ok;
 reply_connect(#{connect_from := From}, Reply) -> gen_statem:reply(From, Reply).
+reply_flush(#{flush_from := undefined}, _Reply) -> ok;
+reply_flush(#{flush_from := From}, Reply) -> gen_statem:reply(From, Reply).
 notify(State, Event, Data) -> maps:get(owner, maps:get(options, State)) ! {enats_client, self(), Event, Data}.
 reply(From, Value) -> {keep_state_and_data, {reply, From, Value}}.
 reply_action(From, Value) -> [{reply, From, Value}].
@@ -280,7 +313,29 @@ close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
 normalize_options(Options) -> maps:merge(#{host => "127.0.0.1", port => 4222, tls => false, ssl_opts => [],
     connect_timeout => 5000, reconnect => false, reconnect_delay => 1000, auth => none, owner => self()},
     normalize_servers(Options)).
-normalize_info(Info) -> maps:fold(fun(Key, Value, Acc) -> maps:put(binary_to_atom(Key, utf8), Value, Acc) end, #{}, Info).
+normalize_info(Info) ->
+    maps:fold(fun(Key, Value, Acc) -> maps:put(info_key(Key), Value, Acc) end, #{}, Info).
+
+info_key(<<"server_id">>) -> server_id;
+info_key(<<"server_name">>) -> server_name;
+info_key(<<"version">>) -> version;
+info_key(<<"go">>) -> go;
+info_key(<<"host">>) -> host;
+info_key(<<"port">>) -> port;
+info_key(<<"headers">>) -> headers;
+info_key(<<"max_payload">>) -> max_payload;
+info_key(<<"proto">>) -> proto;
+info_key(<<"auth_required">>) -> auth_required;
+info_key(<<"tls_required">>) -> tls_required;
+info_key(<<"tls_verify">>) -> tls_verify;
+info_key(<<"tls_available">>) -> tls_available;
+info_key(<<"connect_urls">>) -> connect_urls;
+info_key(<<"ws_connect_urls">>) -> ws_connect_urls;
+info_key(<<"jetstream">>) -> jetstream;
+info_key(<<"nonce">>) -> nonce;
+info_key(<<"client_id">>) -> client_id;
+info_key(<<"client_ip">>) -> client_ip;
+info_key(Key) -> Key.
 reconnect_delay(State) -> maps:get(reconnect_delay, maps:get(options, State)).
 terminate(_Reason, _StateName, State) -> close(State), ok.
 

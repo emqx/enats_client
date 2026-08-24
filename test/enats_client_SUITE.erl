@@ -5,6 +5,8 @@
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([t_frame_fragmentation/1, t_frame_invalid/1, t_frame_edges/1, t_connect_publish_subscribe_flush/1,
+    t_default_owner/1, t_connect_idempotence/1, t_coalesced_flush/1, t_server_limits/1,
+    t_flush_concurrency/1,
     t_headers/1, t_frame_variants/1, t_auth_helpers/1, t_nkey_helpers/1,
     t_secret_and_subject/1, t_invalid_subject/1, t_lazy_secret/1,
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
@@ -13,7 +15,8 @@
     t_nkey_nats_server/1, t_token_nats_server/1]).
 
 all() ->
-    [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush, t_headers,
+    [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
+        t_default_owner, t_connect_idempotence, t_coalesced_flush, t_server_limits, t_flush_concurrency, t_headers,
         t_frame_variants, t_auth_helpers, t_nkey_helpers, t_secret_and_subject,
         t_invalid_subject, t_lazy_secret, t_user_password, t_tls, t_connection_errors,
         t_connection_queries,
@@ -78,6 +81,55 @@ t_connect_publish_subscribe_flush(Config) ->
     ok = enats_client:disconnect(Client),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client).
+
+t_default_owner(Config) ->
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => ?config(port, Config)}),
+    ok = enats_client:connect(Client),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"enats.default-owner">>, #{}),
+    ok = enats_client:publish(Client, <<"enats.default-owner">>, <<"hello">>),
+    ok = enats_client:flush(Client, 1000),
+    receive
+        {enats_client, Client, {message, #{payload := <<"hello">>}}} -> ok
+    after 1000 -> ct:fail(default_owner_did_not_receive_message)
+    end,
+    ok = enats_client:stop(Client).
+
+t_connect_idempotence(Config) ->
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => ?config(port, Config), owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual({error, already_connected}, enats_client:connect(Client)),
+    ok = enats_client:stop(Client).
+
+t_coalesced_flush(_Config) ->
+    {Server, Port} = start_fake_server(coalesced_flush),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_server_limits(_Config) ->
+    {Server, Port} = start_fake_server(server_limits),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual({error, {payload_too_large, 3}},
+        enats_client:publish(Client, <<"limits">>, <<"1234">>)),
+    ?assertEqual({error, headers_not_supported},
+        enats_client:publish(Client, <<"limits">>, <<"ok">>, #{headers => [{<<"x">>, <<"y">>}]})),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_flush_concurrency(_Config) ->
+    {Server, Port} = start_fake_server(flush_concurrent),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    Parent = self(),
+    spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 2000)} end),
+    receive {fake_flush_received, Server} -> ok after 1000 -> ct:fail(first_flush_not_received) end,
+    ?assertEqual({error, flush_in_progress}, enats_client:flush(Client, 2000)),
+    receive {first_flush, ok} -> ok after 2000 -> ct:fail(first_flush_not_completed) end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
 
 t_headers(Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => ?config(port, Config), owner => self()}),
@@ -180,33 +232,71 @@ t_lazy_secret(_Config) ->
     receive secret_called -> ct:fail(secret_evaluated_before_connect) after 50 -> ok end,
     ok = enats_client:stop(Client).
 
-t_user_password(_Config) ->
+t_user_password(Config) ->
     case os:getenv("ENATS_AUTH_PORT") of
-        false -> {skip, "set ENATS_AUTH_PORT to run against an authenticated nats-server"};
+        false ->
+            case nats_server_executable() of
+                unavailable -> {skip, "nats-server executable is unavailable"};
+                {ok, _} ->
+                    Port = dynamic_port(),
+                    PidFile = filename:join(?config(priv_dir, Config), "nats-userpass.pid"),
+                    Server = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port), "-P", PidFile,
+                        "--user", "alice", "--pass", "secret"]),
+                    wait_for_port(Port),
+                    try user_password_case(Port) after stop_nats_server(Server, PidFile) end
+            end;
         Port0 ->
-            Parent = self(),
-            Provider = fun() -> Parent ! password_called, <<"secret">> end,
-            Auth = #{mechanism => user_password, username => <<"alice">>, password => Provider},
-            {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => list_to_integer(Port0),
-                auth => Auth, owner => self()}),
-            ok = enats_client:connect(Client),
-            receive password_called -> ok after 1000 -> ct:fail(secret_provider_not_called) end,
-            ok = enats_client:publish(Client, <<"enats.auth">>, <<"ok">>),
-            ok = enats_client:flush(Client, 1000),
-            ok = enats_client:stop(Client)
+            user_password_case(list_to_integer(Port0))
     end.
 
-t_tls(_Config) ->
+t_tls(Config) ->
     case os:getenv("ENATS_TLS_PORT") of
-        false -> {skip, "set ENATS_TLS_PORT to run against a TLS nats-server"};
+        false ->
+            case nats_server_executable() of
+                unavailable -> {skip, "nats-server executable is unavailable"};
+                {ok, _} ->
+                    PrivDir = ?config(priv_dir, Config),
+                    Port = dynamic_port(),
+                    PidFile = filename:join(PrivDir, "nats-tls.pid"),
+                    CertFile = filename:join(PrivDir, "nats-tls.crt"),
+                    KeyFile = filename:join(PrivDir, "nats-tls.key"),
+                    generate_test_certificate(CertFile, KeyFile),
+                    Server = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port), "-P", PidFile,
+                        "--tls", "--tlscert", CertFile, "--tlskey", KeyFile]),
+                    wait_for_port(Port),
+                    try tls_case(Port) after stop_nats_server(Server, PidFile) end
+            end;
         Port0 ->
-            {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => list_to_integer(Port0),
-                tls => true, ssl_opts => [{verify, verify_none}], owner => self()}),
-            ok = enats_client:connect(Client),
-            ok = enats_client:publish(Client, <<"enats.tls">>, <<"ok">>),
-            ok = enats_client:flush(Client, 1000),
-            ok = enats_client:stop(Client)
+            tls_case(list_to_integer(Port0))
     end.
+
+user_password_case(Port) ->
+    Parent = self(),
+    Provider = fun() -> Parent ! password_called, <<"secret">> end,
+    Auth = #{mechanism => user_password, username => <<"alice">>, password => Provider},
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, auth => Auth, owner => self()}),
+    ok = enats_client:connect(Client),
+    receive password_called -> ok after 1000 -> ct:fail(secret_provider_not_called) end,
+    ok = enats_client:publish(Client, <<"enats.auth">>, <<"ok">>),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:stop(Client).
+
+tls_case(Port) ->
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port,
+        tls => true, ssl_opts => [{verify, verify_none}], owner => self()}),
+    ok = enats_client:connect(Client),
+    ok = enats_client:publish(Client, <<"enats.tls">>, <<"ok">>),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:stop(Client).
+
+generate_test_certificate(CertFile, KeyFile) ->
+    Command = lists:flatten(io_lib:format(
+        "openssl req -x509 -newkey rsa:2048 -nodes -keyout ~ts -out ~ts -subj /CN=localhost -days 1 >/dev/null 2>&1",
+        [KeyFile, CertFile])),
+    _ = os:cmd(Command),
+    {ok, _} = file:read_file(CertFile),
+    {ok, _} = file:read_file(KeyFile),
+    ok.
 
 t_connection_errors(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => 1, owner => self()}),
@@ -296,6 +386,8 @@ t_topology_info(_Config) ->
     ok = enats_client:connect(Client),
     Info = enats_client:info(Client),
     ?assertEqual([<<"nats://127.0.0.1:14222">>, <<"bad">>], maps:get(connect_urls, Info)),
+    ?assertEqual(<<"untrusted">>, maps:get(<<"untrusted">>, Info)),
+    ?assertEqual(false, lists:keymember(untrusted, 1, maps:to_list(Info))),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
@@ -440,6 +532,7 @@ fake_server(Parent, Mode) ->
             case Mode of
                 silent -> ok;
                 topology -> ok = gen_tcp:send(Socket, fake_topology_info());
+                server_limits -> ok = gen_tcp:send(Socket, fake_limits_info());
                 _ -> ok = gen_tcp:send(Socket, fake_info())
             end,
             _ = gen_tcp:recv(Socket, 0, 1000),
@@ -449,6 +542,20 @@ fake_server(Parent, Mode) ->
                 silent -> timer:sleep(500);
                 no_pong -> timer:sleep(500);
                 topology -> ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
+                server_limits ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    timer:sleep(500);
+                coalesced_flush ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\nPING\r\n">>),
+                    _ = gen_tcp:recv(Socket, 0, 1000),
+                    _ = gen_tcp:recv(Socket, 0, 1000),
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
+                flush_concurrent ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, _FlushData} = gen_tcp:recv(Socket, 0, 1000),
+                    Parent ! {fake_flush_received, self()},
+                    timer:sleep(500),
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
                 flush_timeout ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, _Ignored} = gen_tcp:recv(Socket, 0, 1000),
@@ -481,7 +588,10 @@ fake_info() ->
     <<"INFO {\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n">>.
 
 fake_topology_info() ->
-    <<"INFO {\"proto\":1,\"headers\":true,\"connect_urls\":[\"nats://127.0.0.1:14222\",\"bad\"]}\r\n">>.
+    <<"INFO {\"proto\":1,\"headers\":true,\"connect_urls\":[\"nats://127.0.0.1:14222\",\"bad\"],\"untrusted\":\"untrusted\"}\r\n">>.
+
+fake_limits_info() ->
+    <<"INFO {\"proto\":1,\"headers\":false,\"max_payload\":3}\r\n">>.
 
 recv_until(Socket, Needle, Acc) ->
     case binary:match(Acc, Needle) of
