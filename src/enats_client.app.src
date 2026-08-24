@@ -1,0 +1,8 @@
+{application, enats_client,
+ [{description, "A small OTP NATS Core client"},
+  {vsn, "0.1.0"},
+  {modules, []},
+  {registered, []},
+  {applications, [kernel, stdlib, ssl, crypto]},
+  {mod, {enats_client_app, []}},
+  {env, []}]}.
