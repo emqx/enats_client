@@ -5,7 +5,7 @@ enats_client is an Erlang/OTP client for the Core NATS protocol.
 The public entry point is the enats_client module. It provides connection
 lifecycle management, TCP/TLS transport, Core NATS publish/subscribe,
 headers, flush barriers, reconnect, server-list failover, NKey,
-username/password, and token authentication.
+username/password, token, JWT, and `.creds` authentication.
 
 JetStream publish is supported through `jetstream_publish/4`. It waits for
 the JetStream PubAck and accepts an optional stable `msg_id` for server-side
@@ -31,6 +31,10 @@ outside the current scope.
 
 Secret providers are evaluated on every connection and reconnect. Resolved
 secret values are not retained in client state.
+
+`enats_credentials:from_file/1` parses the standard NATS `.creds` format,
+including the JWT and user NKey seed blocks. TLS is strict when enabled:
+the client never silently downgrades to plaintext.
 
 publish/3 reports a successful socket write. It does not imply persistence
 or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that
