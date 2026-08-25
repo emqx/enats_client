@@ -13,7 +13,7 @@
     t_fake_connection_paths/1,
     t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
-    t_request_timeout_cleanup/1]).
+    t_request_timeout_cleanup/1, t_jetstream_no_responders/1]).
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
@@ -24,7 +24,7 @@ all() ->
         t_fake_connection_paths, t_reconnect, t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
-        t_request_timeout_cleanup].
+        t_request_timeout_cleanup, t_jetstream_no_responders].
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
@@ -517,6 +517,17 @@ t_request_timeout_cleanup(_Config) ->
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
+t_jetstream_no_responders(_Config) ->
+    {Server, Port} = start_fake_server(jetstream_no_responders),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, {jetstream_unavailable, <<"503">>}},
+        enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
+    ),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 encode_seed(PrivateSeed) ->
     Prefix = <<16#90, 16#A0, PrivateSeed/binary>>,
     encode_base32(<<Prefix/binary, (test_crc16(Prefix)):16/little>>).
@@ -660,11 +671,28 @@ fake_server(Parent, Mode) ->
                     Parent ! {fake_request_sub, self()},
                     {ok, _Unsub} = recv_until(Socket, <<"UNSUB ">>, <<>>),
                     Parent ! {fake_request_unsub, self()},
+                    timer:sleep(100);
+                jetstream_no_responders ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, SubData0} = recv_until(Socket, <<"SUB ">>, <<>>),
+                    {ok, SubData} = recv_until(Socket, <<"\r\n">>, SubData0),
+                    [_, Inbox, Sid | _] = binary:split(find_sub_line(SubData), <<" ">>, [global]),
+                    Header = <<"NATS/1.0\r\nStatus: 503\r\n\r\n">>,
+                    HeaderSize = byte_size(Header),
+                    ok = gen_tcp:send(Socket, [
+                        <<"HMSG ">>, Inbox, <<" ">>, Sid, <<" ">>,
+                        integer_to_binary(HeaderSize), <<" ">>, integer_to_binary(HeaderSize), <<"\r\n">>,
+                        Header, <<"\r\n">>
+                    ]),
                     timer:sleep(100)
             end,
             gen_tcp:close(Socket),
             gen_tcp:close(Listener)
     end.
+
+find_sub_line(Data) ->
+    [Line | _] = [L || L <- binary:split(Data, <<"\r\n">>, [global]), binary:match(L, <<"SUB ">>) =/= nomatch],
+    Line.
 
 fake_reconnect(Listener, Parent) ->
     {ok, First} = gen_tcp:accept(Listener),

@@ -403,7 +403,12 @@ reply_requests(#{requests := Requests}, Reply) ->
         end,
         Requests
     ).
-notify(State, Event, Data) -> maps:get(owner, maps:get(options, State)) ! {enats_client, self(), Event, Data}.
+notify(State, Event, Data) ->
+    Options = maps:get(options, State),
+    case maps:get(notify, Options, true) of
+        true -> maps:get(owner, Options) ! {enats_client, self(), Event, Data};
+        false -> ok
+    end.
 reply(From, Value) -> {keep_state_and_data, {reply, From, Value}}.
 reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
@@ -415,7 +420,7 @@ close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
 normalize_options(Options) -> maps:merge(#{host => "127.0.0.1", port => 4222, tls => false, ssl_opts => [],
     tls_handshake => starttls, connect_timeout => 5000, reconnect => false, reconnect_delay => 1000,
-    auth => none, owner => self()},
+    auth => none, owner => self(), notify => true},
     normalize_servers(Options)).
 normalize_info(Info) ->
     maps:fold(fun(Key, Value, Acc) -> maps:put(info_key(Key), Value, Acc) end, #{}, Info).
