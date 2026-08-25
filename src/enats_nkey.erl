@@ -20,8 +20,9 @@ sign_fun(_PublicKey, PrivateKey)
 
 from_seed(Seed0) when is_binary(Seed0) ->
     try
-        <<Prefix:8, Seed:32/binary, _Crc:16/little>> = base32_decode(Seed0),
-        true = Prefix =:= 16#30,
+        <<SeedPrefix:8, UserPrefix:8, Seed:32/binary, _Crc:16/little>> = base32_decode(Seed0),
+        true = SeedPrefix =:= 16#90,
+        true = UserPrefix =:= 16#A0,
         {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
         Public = encode_public(PublicKey),
         {ok, Public, sign_fun(Public, Seed)}
@@ -69,8 +70,8 @@ base32_decode(Bin) ->
         <<>>,
         binary_to_list(Bin)
     ),
-    <<_Rest/binary>> = Bits,
-    Bits.
+    <<Bytes:288/bitstring, _Padding:2>> = Bits,
+    Bytes.
 
 base32_value(Char) when Char >= $A, Char =< $Z -> Char - $A;
 base32_value(Char) when Char >= $2, Char =< $7 -> Char - $2 + 26.

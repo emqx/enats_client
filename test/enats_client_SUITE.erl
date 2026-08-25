@@ -503,13 +503,18 @@ t_nkey_seed(_Config) ->
     ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).
 
 encode_seed(PrivateSeed) ->
-    encode_base32(<<16#30, PrivateSeed/binary, 0:16/little>>).
+    encode_base32(<<16#90, 16#A0, PrivateSeed/binary, 0:16/little>>).
 
 encode_base32(Bits) ->
     encode_base32(Bits, []).
 
 encode_base32(<<Value:5, Rest/bitstring>>, Acc) ->
     encode_base32(Rest, [lists:nth(Value + 1, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") | Acc]);
+encode_base32(Bits, Acc) when bit_size(Bits) > 0 ->
+    Size = bit_size(Bits),
+    <<Value:Size>> = Bits,
+    Padded = Value bsl (5 - Size),
+    encode_base32(<<>>, [lists:nth(Padded + 1, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") | Acc]);
 encode_base32(<<>>, Acc) ->
     list_to_binary(lists:reverse(Acc)).
 
