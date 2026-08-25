@@ -307,9 +307,10 @@ ssl_result(Error) -> Error.
 maybe_upgrade_tls(Info, #{socket := {tcp, Socket}, options := Options, current_server := {Host, _Port}} = State) ->
     NeedTLS = maps:get(tls, Options) andalso
         (maps:get(tls_required, Info, false) orelse maps:get(tls_available, Info, false)),
-    case NeedTLS of
-        false -> {ok, State};
-        true ->
+    case {maps:get(tls, Options), NeedTLS} of
+        {true, false} -> {error, tls_not_available};
+        {false, false} -> {ok, State};
+        {true, true} ->
             _ = inet:setopts(Socket, [{active, false}]),
             SslOpts = [{active, true}, {server_name_indication, Host} |
                 maps:get(ssl_opts, Options)],

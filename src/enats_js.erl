@@ -10,7 +10,7 @@ publish(Client, Subject, Payload, Options) ->
         {ok, #{payload := Response} = Message} ->
             case response_status(maps:get(headers, Message, [])) of
                 undefined -> decode_pub_ack(Response);
-                Status -> {error, {jetstream_unavailable, Status}}
+                Status -> classify_status(Status)
             end;
         {error, _} = Error ->
             Error
@@ -22,6 +22,11 @@ response_status(Headers) ->
         false -> undefined
     end.
 
+classify_status(<<"5", _/binary>> = Status) ->
+    {error, {jetstream_unavailable, Status}};
+classify_status(Status) ->
+    {error, {jetstream_rejected, Status}}.
+
 maybe_msg_id_header(undefined, Headers) -> Headers;
 maybe_msg_id_header(MsgId, Headers) when is_binary(MsgId) ->
     [{<<"Nats-Msg-Id">>, MsgId} | Headers].
@@ -29,7 +34,7 @@ maybe_msg_id_header(MsgId, Headers) when is_binary(MsgId) ->
 decode_pub_ack(Payload) ->
     try jsx:decode(Payload, [return_maps]) of
         #{<<"error">> := Error} ->
-            {error, {jetstream_error, Error}};
+            classify_error(Error);
         #{<<"stream">> := Stream, <<"seq">> := Sequence} = Ack ->
             {ok, #{stream => Stream, sequence => Sequence,
                 duplicate => maps:get(<<"duplicate">>, Ack, false)}};
@@ -38,3 +43,8 @@ decode_pub_ack(Payload) ->
     catch
         Class:Reason -> {error, {invalid_jetstream_ack, Class, Reason}}
     end.
+
+classify_error(#{<<"code">> := Code} = Error) when is_integer(Code), Code >= 500 ->
+    {error, {jetstream_unavailable, Error}};
+classify_error(Error) ->
+    {error, {jetstream_rejected, Error}}.

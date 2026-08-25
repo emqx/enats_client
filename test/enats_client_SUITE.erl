@@ -13,7 +13,8 @@
     t_fake_connection_paths/1,
     t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
-    t_request_timeout_cleanup/1, t_jetstream_no_responders/1]).
+    t_request_timeout_cleanup/1, t_jetstream_no_responders/1, t_jetstream_json_unavailable/1,
+    t_tls_downgrade_rejected/1]).
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
@@ -24,7 +25,8 @@ all() ->
         t_fake_connection_paths, t_reconnect, t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
-        t_request_timeout_cleanup, t_jetstream_no_responders].
+        t_request_timeout_cleanup, t_jetstream_no_responders, t_jetstream_json_unavailable,
+        t_tls_downgrade_rejected].
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
@@ -502,6 +504,13 @@ t_nkey_seed(_Config) ->
         #{nonce => <<"nonce">>},
         #{}
     ),
+    Creds = iolist_to_binary([
+        "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n",
+        "-----BEGIN USER NKEY SEED-----\n", Seed,
+        "\n------END USER NKEY SEED------\n"
+    ]),
+    {ok, CredsAuth} = enats_credentials:from_binary(Creds),
+    {ok, <<"jwt">>} = enats_secret:resolve(maps:get(jwt, CredsAuth)),
     ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).
 
 t_request_timeout_cleanup(_Config) ->
@@ -523,6 +532,26 @@ t_jetstream_no_responders(_Config) ->
     ok = enats_client:connect(Client),
     ?assertEqual(
         {error, {jetstream_unavailable, <<"503">>}},
+        enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
+    ),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_tls_downgrade_rejected(_Config) ->
+    {Server, Port} = start_fake_server(tls_unavailable),
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1", port => Port, tls => true, owner => self()
+    }),
+    ?assertEqual({error, {tls_upgrade_failed, tls_not_available}}, enats_client:connect(Client)),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_jetstream_json_unavailable(_Config) ->
+    {Server, Port} = start_fake_server(jetstream_json_unavailable),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertMatch(
+        {error, {jetstream_unavailable, #{<<"code">> := 503}}},
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -683,6 +712,19 @@ fake_server(Parent, Mode) ->
                         <<"HMSG ">>, Inbox, <<" ">>, Sid, <<" ">>,
                         integer_to_binary(HeaderSize), <<" ">>, integer_to_binary(HeaderSize), <<"\r\n">>,
                         Header, <<"\r\n">>
+                    ]),
+                    timer:sleep(100);
+                tls_unavailable ->
+                    timer:sleep(100);
+                jetstream_json_unavailable ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, SubData0} = recv_until(Socket, <<"SUB ">>, <<>>),
+                    {ok, SubData} = recv_until(Socket, <<"\r\n">>, SubData0),
+                    [_, Inbox, Sid | _] = binary:split(find_sub_line(SubData), <<" ">>, [global]),
+                    Payload = <<"{\"error\":{\"code\":503,\"description\":\"temporary\"}}">>,
+                    ok = gen_tcp:send(Socket, [
+                        <<"MSG ">>, Inbox, <<" ">>, Sid, <<" ">>,
+                        integer_to_binary(byte_size(Payload)), <<"\r\n">>, Payload, <<"\r\n">>
                     ]),
                     timer:sleep(100)
             end,
