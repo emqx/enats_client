@@ -20,9 +20,10 @@ sign_fun(_PublicKey, PrivateKey)
 
 from_seed(Seed0) when is_binary(Seed0) ->
     try
-        <<SeedPrefix:8, UserPrefix:8, Seed:32/binary, _Crc:16/little>> = base32_decode(Seed0),
+        <<SeedPrefix:8, UserPrefix:8, Seed:32/binary, Crc:16/little>> = base32_decode(Seed0),
         true = SeedPrefix =:= 16#90,
         true = UserPrefix =:= 16#A0,
+        true = Crc =:= crc16(<<SeedPrefix, UserPrefix, Seed/binary>>),
         {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
         Public = encode_public(PublicKey),
         {ok, Public, sign_fun(Public, Seed)}

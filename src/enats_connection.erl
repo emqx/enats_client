@@ -124,7 +124,7 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
             case validate_publish_options(Payload, Options, State) of
                 ok ->
                     Sid = integer_to_binary(maps:get(next_sid, State)),
-                    Inbox = <<"_INBOX.enats.", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+                    Inbox = request_inbox(),
                     case send_frame({sub, Inbox, Sid, undefined}, State) of
                         ok ->
                             case send_frame(publish_frame(Subject, Payload, Options#{reply_to => Inbox}), State) of
@@ -190,11 +190,15 @@ connected(_, _, State) -> keep(State).
 request_timeout(Sid, State) ->
     case maps:take(Sid, maps:get(requests, State)) of
         {#{from := From}, Requests} ->
+            _ = send_frame({unsub, Sid}, State),
             gen_statem:reply(From, {error, timeout}),
             {keep_state, State#{requests => Requests}, []};
         error ->
             keep(State)
     end.
+
+request_inbox() ->
+    <<"_INBOX.enats.", (binary:encode_hex(crypto:strong_rand_bytes(16)))/binary>>.
 
 reconnecting(state_timeout, reconnect, State) ->
     case open_socket(State) of

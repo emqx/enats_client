@@ -12,7 +12,8 @@
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
     t_fake_connection_paths/1,
     t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
-    t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1]).
+    t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
+    t_request_timeout_cleanup/1]).
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
@@ -22,7 +23,8 @@ all() ->
         t_connection_queries,
         t_fake_connection_paths, t_reconnect, t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
-        t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed].
+        t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
+        t_request_timeout_cleanup].
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
@@ -502,8 +504,33 @@ t_nkey_seed(_Config) ->
     ),
     ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).
 
+t_request_timeout_cleanup(_Config) ->
+    {Server, Port} = start_fake_server(request_timeout),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    Parent = self(),
+    spawn(fun() -> Parent ! {request_result,
+        enats_client:request(Client, <<"$JS.API.TEST">>, <<"{}">>, #{timeout => 20})} end),
+    receive {fake_request_sub, Server} -> ok after 1000 -> ct:fail(request_sub_not_seen) end,
+    receive {request_result, {error, timeout}} -> ok after 1000 -> ct:fail(request_timeout_not_seen) end,
+    receive {fake_request_unsub, Server} -> ok after 1000 -> ct:fail(request_unsub_not_seen) end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 encode_seed(PrivateSeed) ->
-    encode_base32(<<16#90, 16#A0, PrivateSeed/binary, 0:16/little>>).
+    Prefix = <<16#90, 16#A0, PrivateSeed/binary>>,
+    encode_base32(<<Prefix/binary, (test_crc16(Prefix)):16/little>>).
+
+test_crc16(Bin) -> test_crc16(Bin, 0).
+test_crc16(<<>>, Crc) -> Crc;
+test_crc16(<<Byte, Rest/binary>>, Crc0) ->
+    Crc1 = Crc0 bxor (Byte bsl 8),
+    test_crc16(Rest, test_crc_byte(Crc1, 8)).
+
+test_crc_byte(Crc, 0) -> Crc band 16#FFFF;
+test_crc_byte(Crc, N) when Crc band 16#8000 =/= 0 ->
+    test_crc_byte(((Crc bsl 1) bxor 16#1021) band 16#FFFF, N - 1);
+test_crc_byte(Crc, N) -> test_crc_byte((Crc bsl 1) band 16#FFFF, N - 1).
 
 encode_base32(Bits) ->
     encode_base32(Bits, []).
@@ -626,7 +653,14 @@ fake_server(Parent, Mode) ->
                 flush_timeout ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, _Ignored} = gen_tcp:recv(Socket, 0, 1000),
-                    timer:sleep(500)
+                    timer:sleep(500);
+                request_timeout ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, _Sub} = recv_until(Socket, <<"SUB ">>, <<>>),
+                    Parent ! {fake_request_sub, self()},
+                    {ok, _Unsub} = recv_until(Socket, <<"UNSUB ">>, <<>>),
+                    Parent ! {fake_request_unsub, self()},
+                    timer:sleep(100)
             end,
             gen_tcp:close(Socket),
             gen_tcp:close(Listener)
