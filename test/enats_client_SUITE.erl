@@ -12,7 +12,7 @@
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
     t_fake_connection_paths/1,
     t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
-    t_nkey_nats_server/1, t_token_nats_server/1]).
+    t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1]).
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
@@ -22,7 +22,7 @@ all() ->
         t_connection_queries,
         t_fake_connection_paths, t_reconnect, t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
-        t_nkey_nats_server, t_token_nats_server].
+        t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed].
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
@@ -319,6 +319,9 @@ t_connection_queries(Config) ->
         enats_connection:publish(Client, <<"bad subject">>, <<"payload">>, #{})),
     ?assertEqual({error, {invalid_subject, invalid_subject}},
         enats_client:subscribe(Client, <<"bad subject">>, #{})),
+    ?assertEqual({error, timeout},
+        enats_client:request(Client, <<"no.reply">>, <<"payload">>, #{timeout => 20})),
+    ?assertMatch({error, _}, enats_js:publish(self(), <<"subject">>, <<"payload">>, #{})),
     ?assertEqual({error, not_found}, enats_client:unsubscribe(Client, make_ref())),
     ok = enats_client:disconnect(Client),
     ok = enats_client:stop(Client),
@@ -452,6 +455,63 @@ t_token_nats_server_impl(Config) ->
     ok = enats_client:flush(Client, 1000),
     ok = enats_client:stop(Client),
     stop_nats_server(NatsServer, PidFile).
+
+t_jetstream_nats_server(Config) ->
+    case nats_server_executable() of
+        unavailable -> {skip, "nats-server executable is unavailable"};
+        {ok, _} ->
+            Port = dynamic_port(),
+            PidFile = filename:join(?config(priv_dir, Config), "nats-jetstream.pid"),
+            Server = start_nats_process(["-a", "127.0.0.1", "-p", integer_to_list(Port),
+                "-P", PidFile, "-js"]),
+            wait_for_port(Port),
+            try
+                {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+                ok = enats_client:connect(Client),
+                StreamConfig = jsx:encode(#{<<"name">> => <<"ORDERS">>,
+                    <<"subjects">> => [<<"orders.>">>]}),
+                {ok, #{payload := _CreateAck}} = enats_client:request(
+                    Client, <<"$JS.API.STREAM.CREATE.ORDERS">>, StreamConfig, #{timeout => 2000}
+                ),
+                {ok, Ack1} = enats_client:jetstream_publish(
+                    Client, <<"orders.test">>, <<"hello">>,
+                    #{msg_id => <<"id-1">>, timeout => 2000}
+                ),
+                {ok, Ack2} = enats_client:jetstream_publish(
+                    Client, <<"orders.test">>, <<"hello">>,
+                    #{msg_id => <<"id-1">>, timeout => 2000}
+                ),
+                ?assertEqual(maps:get(sequence, Ack1), maps:get(sequence, Ack2)),
+                ?assertEqual(true, maps:get(duplicate, Ack2)),
+                ok = enats_client:stop(Client)
+            after
+                stop_nats_server(Server, PidFile)
+            end
+    end.
+
+t_nkey_seed(_Config) ->
+    Seed = encode_seed(<<1:256>>),
+    {ok, PublicKey, SignFun} = enats_nkey:from_seed(Seed),
+    ?assertEqual(56, byte_size(PublicKey)),
+    ?assertEqual(86, byte_size(SignFun(<<"nonce">>))),
+    {ok, #{jwt := <<"jwt">>, nkey := <<"PUB">>, sig := <<"SIG">>}} = enats_auth:connect_params(
+        #{mechanism => jwt, jwt => fun() -> <<"jwt">> end, public_key => <<"PUB">>,
+            sign_fun => fun(<<"nonce">>) -> <<"SIG">> end},
+        #{nonce => <<"nonce">>},
+        #{}
+    ),
+    ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).
+
+encode_seed(PrivateSeed) ->
+    encode_base32(<<16#30, PrivateSeed/binary, 0:16/little>>).
+
+encode_base32(Bits) ->
+    encode_base32(Bits, []).
+
+encode_base32(<<Value:5, Rest/bitstring>>, Acc) ->
+    encode_base32(Rest, [lists:nth(Value + 1, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") | Acc]);
+encode_base32(<<>>, Acc) ->
+    list_to_binary(lists:reverse(Acc)).
 
 start_nats_server(ConfigFile, PidFile) ->
     start_nats_process(["-DV", "-P", PidFile, "-c", ConfigFile]).

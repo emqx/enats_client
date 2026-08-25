@@ -1,6 +1,6 @@
 -module(enats_nkey).
 
--export([encode_public/1, sign_fun/2]).
+-export([encode_public/1, sign_fun/2, from_seed/1]).
 
 -define(USER_PREFIX, 16#A0).
 -define(ALPHABET, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567").
@@ -16,6 +16,17 @@ sign_fun(_PublicKey, PrivateKey)
     fun(Nonce) ->
         Signature = crypto:sign(eddsa, none, Nonce, [PrivateKey, ed25519]),
         base64url(Signature)
+    end.
+
+from_seed(Seed0) when is_binary(Seed0) ->
+    try
+        <<Prefix:8, Seed:32/binary, _Crc:16/little>> = base32_decode(Seed0),
+        true = Prefix =:= 16#30,
+        {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
+        Public = encode_public(PublicKey),
+        {ok, Public, sign_fun(Public, Seed)}
+    catch
+        _:_ -> {error, invalid_nkey_seed}
     end.
 
 base32(<<>>, Acc) ->
@@ -51,3 +62,15 @@ crc_byte(Crc, N) when Crc band 16#8000 =/= 0 ->
     crc_byte(((Crc bsl 1) bxor 16#1021) band 16#FFFF, N - 1);
 crc_byte(Crc, N) ->
     crc_byte((Crc bsl 1) band 16#FFFF, N - 1).
+
+base32_decode(Bin) ->
+    Bits = lists:foldl(
+        fun(Char, Acc) -> <<Acc/bitstring, (base32_value(Char)):5>> end,
+        <<>>,
+        binary_to_list(Bin)
+    ),
+    <<_Rest/binary>> = Bits,
+    Bits.
+
+base32_value(Char) when Char >= $A, Char =< $Z -> Char - $A;
+base32_value(Char) when Char >= $2, Char =< $7 -> Char - $2 + 26.

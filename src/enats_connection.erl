@@ -2,7 +2,7 @@
 -behaviour(gen_statem).
 
 -export([start_link/1, connect/1, connect/2, disconnect/1, stop/1, status/1, info/1,
-    publish/4, subscribe/3, unsubscribe/2, flush/2]).
+    publish/4, request/4, subscribe/3, unsubscribe/2, flush/2]).
 -export([init/1, callback_mode/0, terminate/3, disconnected/3, waiting_info/3,
     waiting_pong/3, connected/3, reconnecting/3]).
 
@@ -17,12 +17,15 @@ status(Pid) -> gen_statem:call(Pid, status, ?TIMEOUT).
 info(Pid) -> gen_statem:call(Pid, info, ?TIMEOUT).
 publish(Pid, Subject, Payload, Options) ->
     safe_call(Pid, {publish, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
+request(Pid, Subject, Payload, Options) ->
+    safe_call(Pid, {request, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
 subscribe(Pid, Subject, Options) -> gen_statem:call(Pid, {subscribe, Subject, Options}, ?TIMEOUT).
 unsubscribe(Pid, Ref) -> gen_statem:call(Pid, {unsubscribe, Ref}, ?TIMEOUT).
-flush(Pid, Timeout) -> gen_statem:call(Pid, {flush, Timeout}, Timeout + 1000).
+flush(Pid, Timeout) -> safe_call(Pid, {flush, Timeout}, Timeout).
 
 safe_call(Pid, Request, Timeout) ->
-    try gen_statem:call(Pid, Request, Timeout + 1000) of
+    CallTimeout = case Timeout of infinity -> infinity; Value -> Value + 1000 end,
+    try gen_statem:call(Pid, Request, CallTimeout) of
         Result -> Result
     catch
         exit:{timeout, _} -> {error, timeout};
@@ -43,6 +46,7 @@ init(Options0) ->
         connect_from => undefined,
         flush_from => undefined,
         subscriptions => #{},
+        requests => #{},
         next_sid => 1,
         servers => maps:get(servers, Options),
         server_index => 1,
@@ -75,6 +79,7 @@ waiting_info(state_timeout, connect_timeout, State) -> lost(waiting_info, timeou
 waiting_info({call, From}, status, _State) -> reply(From, connecting);
 waiting_info({call, From}, disconnect, State) ->
     reply_connect(State, {error, disconnected}),
+    reply_requests(State, {error, disconnected}),
     close(State),
     {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
 waiting_info({call, From}, _Request, _State) -> reply(From, {error, connecting});
@@ -88,6 +93,7 @@ waiting_pong(state_timeout, connect_timeout, State) -> lost(waiting_pong, timeou
 waiting_pong({call, From}, status, _State) -> reply(From, connecting);
 waiting_pong({call, From}, disconnect, State) ->
     reply_connect(State, {error, disconnected}),
+    reply_requests(State, {error, disconnected}),
     close(State),
     {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
 waiting_pong({call, From}, _Request, _State) -> reply(From, {error, connecting});
@@ -105,6 +111,29 @@ connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
                 ok ->
                     case send_frame(publish_frame(Subject, Payload, Options), State) of
                         ok -> reply(From, ok);
+                        {error, Reason} -> lost_with_reply(From, Reason, State)
+                    end;
+                {error, Reason} -> reply(From, {error, Reason})
+            end;
+        {error, Reason} -> reply(From, {error, {invalid_subject, Reason}})
+    end;
+connected({call, From}, {request, Subject, Payload0, Options}, State) ->
+    case enats_subject:validate_publish(Subject) of
+        ok ->
+            Payload = iolist_to_binary(Payload0),
+            case validate_publish_options(Payload, Options, State) of
+                ok ->
+                    Sid = integer_to_binary(maps:get(next_sid, State)),
+                    Inbox = <<"_INBOX.enats.", (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+                    case send_frame({sub, Inbox, Sid, undefined}, State) of
+                        ok ->
+                            case send_frame(publish_frame(Subject, Payload, Options#{reply_to => Inbox}), State) of
+                                ok ->
+                                    Timer = erlang:send_after(maps:get(timeout, Options, ?TIMEOUT), self(), {request_timeout, Sid}),
+                                    Requests = maps:put(Sid, #{from => From, timer => Timer}, maps:get(requests, State)),
+                                    {keep_state, State#{requests => Requests, next_sid => maps:get(next_sid, State) + 1}, []};
+                                {error, Reason} -> lost_with_reply(From, Reason, State)
+                            end;
                         {error, Reason} -> lost_with_reply(From, Reason, State)
                     end;
                 {error, Reason} -> reply(From, {error, Reason})
@@ -148,13 +177,24 @@ connected(state_timeout, flush_timeout, #{flush_from := From} = State) ->
     {keep_state, State#{flush_from => undefined}, reply_action(From, {error, timeout})};
 connected({call, From}, disconnect, State) ->
     reply_flush(State, {error, disconnected}),
+    reply_requests(State, {error, disconnected}),
     close(State), notify(State, disconnected, requested),
     {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
 connected(info, {tcp, Socket, Data}, #{socket := {tcp, Socket}} = State) -> process_data(Data, connected, State);
 connected(info, {ssl, Socket, Data}, #{socket := {ssl, Socket}} = State) -> process_data(Data, connected, State);
 connected(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) -> lost(connected, closed, State);
 connected(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) -> lost(connected, closed, State);
+connected(info, {request_timeout, Sid}, State) -> request_timeout(Sid, State);
 connected(_, _, State) -> keep(State).
+
+request_timeout(Sid, State) ->
+    case maps:take(Sid, maps:get(requests, State)) of
+        {#{from := From}, Requests} ->
+            gen_statem:reply(From, {error, timeout}),
+            {keep_state, State#{requests => Requests}, []};
+        error ->
+            keep(State)
+    end.
 
 reconnecting(state_timeout, reconnect, State) ->
     case open_socket(State) of
@@ -162,7 +202,9 @@ reconnecting(state_timeout, reconnect, State) ->
         {error, _Reason, State1} -> {keep_state, State1, [{state_timeout, reconnect_delay(State1), reconnect}]}
     end;
 reconnecting({call, From}, status, _State) -> reply(From, reconnecting);
-reconnecting({call, From}, disconnect, _State) -> {next_state, disconnected, _State, reply_action(From, ok)};
+reconnecting({call, From}, disconnect, State) ->
+    reply_requests(State, {error, disconnected}),
+    {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
 reconnecting({call, From}, _Request, _State) -> reply(From, {error, disconnected});
 reconnecting(_, _, State) -> keep(State).
 
@@ -208,8 +250,8 @@ process_frame(ping, _StateName, State) -> ok = send_frame(pong, State), {keep_st
 process_frame(pong, connected, #{flush_from := undefined} = State) -> {keep_state, State, []};
 process_frame(pong, connected, #{flush_from := From} = State) ->
     {keep_state, State#{flush_from => undefined}, reply_action(From, ok)};
-process_frame(#{type := msg} = Message, connected, State) -> deliver(Message, State), {keep_state, State, []};
-process_frame(#{type := hmsg} = Message, connected, State) -> deliver(Message, State), {keep_state, State, []};
+process_frame(#{type := msg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
+process_frame(#{type := hmsg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
 process_frame(ok, _StateName, State) -> {keep_state, State, []};
 process_frame(_Frame, _StateName, State) -> {keep_state, State, []}.
 
@@ -314,15 +356,28 @@ restore_subscriptions(State) ->
 
 deliver(Message, State) ->
     Sid = maps:get(sid, Message),
+    case maps:take(Sid, maps:get(requests, State)) of
+        {#{from := From, timer := Timer}, Requests} ->
+            erlang:cancel_timer(Timer),
+            _ = send_frame({unsub, Sid}, State),
+            gen_statem:reply(From, {ok, Message}),
+            State#{requests => Requests};
+        error -> deliver_subscription(Message, State)
+    end.
+
+deliver_subscription(Message, State) ->
+    Sid = maps:get(sid, Message),
     case [Sub || Sub <- maps:values(maps:get(subscriptions, State)), maps:get(sid, Sub) =:= Sid] of
         [#{owner := Owner} | _] -> Owner ! {enats_client, self(), {message, Message}};
         [] -> ok
-    end.
+    end,
+    State.
 
 lost(_StateName, Reason, State) ->
     close(State),
     reply_connect(State, {error, Reason}),
     reply_flush(State, {error, {disconnected, Reason}}),
+    reply_requests(State, {error, {disconnected, Reason}}),
     notify(State, disconnected, Reason),
     case maps:get(reconnect, maps:get(options, State)) of
         false -> {next_state, disconnected, clear_socket(State), []};
@@ -336,12 +391,21 @@ reply_connect(#{connect_from := undefined}, _Reply) -> ok;
 reply_connect(#{connect_from := From}, Reply) -> gen_statem:reply(From, Reply).
 reply_flush(#{flush_from := undefined}, _Reply) -> ok;
 reply_flush(#{flush_from := From}, Reply) -> gen_statem:reply(From, Reply).
+reply_requests(#{requests := Requests}, Reply) ->
+    maps:foreach(
+        fun(_Sid, #{from := From, timer := Timer}) ->
+            erlang:cancel_timer(Timer),
+            gen_statem:reply(From, Reply)
+        end,
+        Requests
+    ).
 notify(State, Event, Data) -> maps:get(owner, maps:get(options, State)) ! {enats_client, self(), Event, Data}.
 reply(From, Value) -> {keep_state_and_data, {reply, From, Value}}.
 reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
 
-clear_socket(State) -> State#{socket => undefined, connect_from => undefined, flush_from => undefined}.
+clear_socket(State) ->
+    State#{socket => undefined, connect_from => undefined, flush_from => undefined, requests => #{}}.
 close(#{socket := undefined}) -> ok;
 close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).

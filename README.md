@@ -7,8 +7,10 @@ lifecycle management, TCP/TLS transport, Core NATS publish/subscribe,
 headers, flush barriers, reconnect, server-list failover, NKey,
 username/password, and token authentication.
 
-JetStream, WebSocket transport, and client-side persistent buffering are
-intentionally outside the current scope.
+JetStream publish is supported through `jetstream_publish/4`. It waits for
+the JetStream PubAck and accepts an optional stable `msg_id` for server-side
+deduplication. WebSocket transport and client-side persistent buffering are
+outside the current scope.
 
 ## Example
 
@@ -33,6 +35,11 @@ secret values are not retained in client state.
 publish/3 reports a successful socket write. It does not imply persistence
 or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that
 the server processed earlier protocol messages.
+
+`jetstream_publish/4` reports the JetStream PubAck. Use a stable `msg_id`
+when retrying a publish after a connection failure. Core NATS publish may be
+replayed by the caller after an uncertain failure; the client deliberately
+does not claim exactly-once delivery for Core NATS.
 
 ## Tests
 
