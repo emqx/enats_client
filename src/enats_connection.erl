@@ -129,7 +129,7 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
                         ok ->
                             case send_frame(publish_frame(Subject, Payload, Options#{reply_to => Inbox}), State) of
                                 ok ->
-                                    Timer = erlang:send_after(maps:get(timeout, Options, ?TIMEOUT), self(), {request_timeout, Sid}),
+                                    Timer = request_timer(maps:get(timeout, Options, ?TIMEOUT), Sid),
                                     Requests = maps:put(Sid, #{from => From, timer => Timer}, maps:get(requests, State)),
                                     {keep_state, State#{requests => Requests, next_sid => maps:get(next_sid, State) + 1}, []};
                                 {error, Reason} -> lost_with_reply(From, Reason, State)
@@ -196,6 +196,11 @@ request_timeout(Sid, State) ->
         error ->
             keep(State)
     end.
+
+request_timer(infinity, _Sid) ->
+    undefined;
+request_timer(Timeout, Sid) ->
+    erlang:send_after(Timeout, self(), {request_timeout, Sid}).
 
 request_inbox() ->
     <<"_INBOX.enats.", (binary:encode_hex(crypto:strong_rand_bytes(16)))/binary>>.
@@ -363,7 +368,7 @@ deliver(Message, State) ->
     Sid = maps:get(sid, Message),
     case maps:take(Sid, maps:get(requests, State)) of
         {#{from := From, timer := Timer}, Requests} ->
-            erlang:cancel_timer(Timer),
+            cancel_request_timer(Timer),
             _ = send_frame({unsub, Sid}, State),
             gen_statem:reply(From, {ok, Message}),
             State#{requests => Requests};
@@ -399,11 +404,17 @@ reply_flush(#{flush_from := From}, Reply) -> gen_statem:reply(From, Reply).
 reply_requests(#{requests := Requests}, Reply) ->
     maps:foreach(
         fun(_Sid, #{from := From, timer := Timer}) ->
-            erlang:cancel_timer(Timer),
+            cancel_request_timer(Timer),
             gen_statem:reply(From, Reply)
         end,
         Requests
     ).
+
+cancel_request_timer(undefined) ->
+    ok;
+cancel_request_timer(Timer) ->
+    _ = erlang:cancel_timer(Timer),
+    ok.
 notify(State, Event, Data) ->
     Options = maps:get(options, State),
     case maps:get(notify, Options, true) of
