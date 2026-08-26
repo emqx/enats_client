@@ -34,7 +34,23 @@ secret values are not retained in client state.
 
 `enats_credentials:from_file/1` parses the standard NATS `.creds` format,
 including the JWT and user NKey seed blocks. TLS is strict when enabled:
-the client never silently downgrades to plaintext.
+the client never silently downgrades to plaintext. By default, the client
+uses the NATS `starttls` handshake, where it receives the server `INFO`
+before upgrading the connection. NATS servers configured with
+`tls.handshake_first: true` require the TLS handshake to happen before `INFO`;
+use `tls_handshake => first` for those servers:
+
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => 4222,
+        tls => true,
+        tls_handshake => first,
+        ssl_opts => [{verify, verify_none}]
+    }),
+
+`tls_handshake => starttls` and `tls_handshake => first` are the two supported
+modes. The mode must match the server configuration; the client does not
+downgrade a TLS-first connection to plaintext.
 
 publish/3 reports a successful socket write. It does not imply persistence
 or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that

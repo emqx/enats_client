@@ -14,7 +14,7 @@
     t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
     t_request_timeout_cleanup/1, t_jetstream_no_responders/1, t_jetstream_json_unavailable/1,
-    t_tls_downgrade_rejected/1, t_request_infinity/1]).
+    t_tls_downgrade_rejected/1, t_tls_first/1, t_request_infinity/1]).
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
@@ -26,7 +26,7 @@ all() ->
         t_server_failover,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
         t_request_timeout_cleanup, t_jetstream_no_responders, t_jetstream_json_unavailable,
-        t_tls_downgrade_rejected, t_request_infinity].
+        t_tls_downgrade_rejected, t_tls_first, t_request_infinity].
 
 init_per_suite(Config) ->
     application:ensure_all_started(enats_client),
@@ -293,6 +293,45 @@ tls_case(Port) ->
     ok = enats_client:connect(Client),
     ok = enats_client:publish(Client, <<"enats.tls">>, <<"ok">>),
     ok = enats_client:flush(Client, 1000),
+    ok = enats_client:stop(Client).
+
+t_tls_first(Config) ->
+    case nats_server_executable() of
+        unavailable -> {skip, "nats-server executable is unavailable"};
+        {ok, _} ->
+            PrivDir = ?config(priv_dir, Config),
+            Port = dynamic_port(),
+            PidFile = filename:join(PrivDir, "nats-tls-first.pid"),
+            CertFile = filename:join(PrivDir, "nats-tls-first.crt"),
+            KeyFile = filename:join(PrivDir, "nats-tls-first.key"),
+            ConfigFile = filename:join(PrivDir, "nats-tls-first.conf"),
+            generate_test_certificate(CertFile, KeyFile),
+            ConfigText = iolist_to_binary([
+                "port: ", integer_to_list(Port), "\n",
+                "tls {\n",
+                "  cert_file: \"", CertFile, "\"\n",
+                "  key_file: \"", KeyFile, "\"\n",
+                "  handshake_first: true\n",
+                "}\n"
+            ]),
+            ok = file:write_file(ConfigFile, ConfigText),
+            Server = start_nats_server(ConfigFile, PidFile),
+            wait_for_port(Port),
+            try tls_first_case(Port) after stop_nats_server(Server, PidFile) end
+    end.
+
+tls_first_case(Port) ->
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port,
+        tls => true, tls_handshake => first, ssl_opts => [{verify, verify_none}], owner => self()}),
+    ok = enats_client:connect(Client),
+    {ok, Subscription} = enats_client:subscribe(Client, <<"enats.tls.first">>, #{}),
+    ok = enats_client:publish(Client, <<"enats.tls.first">>, <<"ok">>),
+    ok = enats_client:flush(Client, 1000),
+    receive
+        {enats_client, Client, {message, #{subject := <<"enats.tls.first">>, payload := <<"ok">>}}} -> ok
+    after 1000 -> ct:fail(tls_first_message_not_received)
+    end,
+    ok = enats_client:unsubscribe(Client, Subscription),
     ok = enats_client:stop(Client).
 
 generate_test_certificate(CertFile, KeyFile) ->

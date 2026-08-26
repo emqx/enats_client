@@ -303,7 +303,7 @@ tcp_result({ok, Socket}) -> {ok, {tcp, Socket}};
 tcp_result(Error) -> Error.
 
 open_transport(Host, Port, #{tls := true, tls_handshake := first, ssl_opts := SslOpts}, Timeout) ->
-    ssl_result(ssl:connect(Host, Port, [{active, true}, {server_name_indication, Host} | SslOpts], Timeout));
+    ssl_result(ssl:connect(Host, Port, [binary, {active, true}, {server_name_indication, Host} | SslOpts], Timeout));
 open_transport(Host, Port, _Options, Timeout) ->
     tcp_result(gen_tcp:connect(Host, Port, [binary, {active, true}, {nodelay, true}], Timeout)).
 
