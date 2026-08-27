@@ -54,7 +54,8 @@ downgrade a TLS-first connection to plaintext.
 
 publish/3 reports a successful socket write. It does not imply persistence
 or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that
-the server processed earlier protocol messages.
+the server processed earlier protocol messages. Concurrent flush/2 calls are
+supported; each call waits for the PONG corresponding to its own PING.
 
 `jetstream_publish/4` reports the JetStream PubAck. Use a stable `msg_id`
 when retrying a publish after a connection failure. Core NATS publish may be

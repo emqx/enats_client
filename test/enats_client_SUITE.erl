@@ -6,7 +6,8 @@
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([t_frame_fragmentation/1, t_frame_invalid/1, t_frame_edges/1, t_connect_publish_subscribe_flush/1,
     t_default_owner/1, t_connect_idempotence/1, t_coalesced_flush/1, t_server_limits/1,
-    t_flush_concurrency/1,
+    t_flush_concurrency/1, t_flush_timeout_preserves_pong_order/1,
+    t_flush_disconnects_all_waiters/1,
     t_headers/1, t_frame_variants/1, t_auth_helpers/1, t_nkey_helpers/1,
     t_secret_and_subject/1, t_invalid_subject/1, t_lazy_secret/1,
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
@@ -18,7 +19,8 @@
 
 all() ->
     [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
-        t_default_owner, t_connect_idempotence, t_coalesced_flush, t_server_limits, t_flush_concurrency, t_headers,
+        t_default_owner, t_connect_idempotence, t_coalesced_flush, t_server_limits, t_flush_concurrency,
+        t_flush_timeout_preserves_pong_order, t_flush_disconnects_all_waiters, t_headers,
         t_frame_variants, t_auth_helpers, t_nkey_helpers, t_secret_and_subject,
         t_invalid_subject, t_lazy_secret, t_user_password, t_tls, t_connection_errors,
         t_connection_queries,
@@ -130,12 +132,74 @@ t_flush_concurrency(_Config) ->
     Parent = self(),
     spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 10000)} end),
     receive {fake_flush_received, Server} -> ok after 1000 -> ct:fail(first_flush_not_received) end,
-    timer:sleep(50),
-    ?assertEqual({error, flush_in_progress}, enats_client:flush(Client, 10000)),
-    Server ! release_flush,
+    spawn(fun() -> Parent ! {second_flush, enats_client:flush(Client, 10000)} end),
+    receive {fake_second_flush_received, Server} -> ok after 1000 -> ct:fail(second_flush_not_received) end,
+    Server ! release_first_flush,
     receive {first_flush, ok} -> ok after 10000 -> ct:fail(first_flush_not_completed) end,
+    receive
+        {second_flush, Result} -> ct:fail({second_flush_completed_by_first_pong, Result})
+    after 50 -> ok
+    end,
+    Server ! release_second_flush,
+    receive {second_flush, ok} -> ok after 10000 -> ct:fail(second_flush_not_completed) end,
     ok = enats_client:stop(Client),
     exit(Server, normal).
+
+t_flush_timeout_preserves_pong_order(_Config) ->
+    {Server, Port} = start_fake_server(flush_timeout_order),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    Parent = self(),
+    spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 20)} end),
+    receive {fake_flush_received, Server} -> ok after 1000 -> ct:fail(first_flush_not_received) end,
+    receive
+        {first_flush, {error, timeout}} -> ok
+    after 1000 -> ct:fail(first_flush_did_not_time_out)
+    end,
+    spawn(fun() -> Parent ! {second_flush, enats_client:flush(Client, 10000)} end),
+    receive {fake_second_flush_received, Server} -> ok after 1000 -> ct:fail(second_flush_not_received) end,
+    Server ! release_timed_out_flush,
+    receive
+        {second_flush, Result} -> ct:fail({second_flush_completed_by_stale_pong, Result})
+    after 50 -> ok
+    end,
+    Server ! release_second_flush,
+    receive {second_flush, ok} -> ok after 10000 -> ct:fail(second_flush_not_completed) end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_flush_disconnects_all_waiters(_Config) ->
+    {Server, Port} = start_fake_server(flush_disconnect),
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1", port => Port, owner => self(), notify => false
+    }),
+    ok = enats_client:connect(Client),
+    Parent = self(),
+    spawn(fun() -> Parent ! {first_flush, enats_client:flush(Client, 10000)} end),
+    receive {fake_flush_received, Server} -> ok after 1000 -> ct:fail(first_flush_not_received) end,
+    spawn(fun() -> Parent ! {second_flush, enats_client:flush(Client, 10000)} end),
+    receive {fake_second_flush_received, Server} -> ok after 1000 -> ct:fail(second_flush_not_received) end,
+    ?assertEqual(
+        lists:sort([
+            {first_flush, {error, {disconnected, closed}}},
+            {second_flush, {error, {disconnected, closed}}}
+        ]),
+        lists:sort(receive_flush_results(2, []))
+    ),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+receive_flush_results(0, Acc) ->
+    Acc;
+receive_flush_results(N, Acc) ->
+    receive
+        {Tag, _Result} = Message when Tag =:= first_flush; Tag =:= second_flush ->
+            receive_flush_results(N - 1, [Message | Acc]);
+        _Other ->
+            receive_flush_results(N, Acc)
+    after 1000 ->
+        ct:fail(flush_disconnect_results_missing)
+    end.
 
 t_headers(Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => ?config(port, Config), owner => self()}),
@@ -737,10 +801,30 @@ fake_server(Parent, Mode) ->
                     timer:sleep(500);
                 flush_concurrent ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
-                    {ok, _FlushData} = gen_tcp:recv(Socket, 0, 1000),
+                    {ok, _FirstFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
                     Parent ! {fake_flush_received, self()},
-                    receive release_flush -> ok end,
+                    {ok, _SecondFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    Parent ! {fake_second_flush_received, self()},
+                    receive release_first_flush -> ok end,
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    receive release_second_flush -> ok end,
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
+                flush_timeout_order ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, _FirstFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    Parent ! {fake_flush_received, self()},
+                    {ok, _SecondFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    Parent ! {fake_second_flush_received, self()},
+                    receive release_timed_out_flush -> ok end,
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    receive release_second_flush -> ok end,
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
+                flush_disconnect ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, _FirstFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    Parent ! {fake_flush_received, self()},
+                    {ok, _SecondFlushData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    Parent ! {fake_second_flush_received, self()};
                 flush_timeout ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, _Ignored} = gen_tcp:recv(Socket, 0, 1000),

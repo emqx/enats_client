@@ -44,7 +44,7 @@ init(Options0) ->
         parse_state => enats_frame:initial_state(),
         server_info => #{},
         connect_from => undefined,
-        flush_from => undefined,
+        flushes => queue:new(),
         subscriptions => #{},
         requests => #{},
         next_sid => 1,
@@ -165,18 +165,19 @@ connected({call, From}, {unsubscribe, Ref}, State) ->
             end;
         error -> reply(From, {error, not_found})
     end;
-connected({call, From}, {flush, _Timeout}, #{flush_from := Existing}) when Existing =/= undefined ->
-    reply(From, {error, flush_in_progress});
 connected({call, From}, {flush, Timeout}, State) ->
     case send_frame(ping, State) of
-        ok -> {keep_state, State#{flush_from => From}, [{state_timeout, Timeout, flush_timeout}]};
+        ok ->
+            Ref = make_ref(),
+            Flush = #{ref => Ref, from => From, timer => flush_timer(Timeout, Ref)},
+            Flushes = queue:in(Flush, maps:get(flushes, State)),
+            {keep_state, State#{flushes => Flushes}, []};
         {error, Reason} -> lost_with_reply(From, Reason, State)
     end;
-connected(state_timeout, flush_timeout, #{flush_from := undefined} = State) -> keep(State);
-connected(state_timeout, flush_timeout, #{flush_from := From} = State) ->
-    {keep_state, State#{flush_from => undefined}, reply_action(From, {error, timeout})};
+connected(info, {flush_timeout, Ref}, State) ->
+    {keep_state, expire_flush(Ref, State), []};
 connected({call, From}, disconnect, State) ->
-    reply_flush(State, {error, disconnected}),
+    reply_flushes(State, {error, disconnected}),
     reply_requests(State, {error, disconnected}),
     close(State), notify(State, disconnected, requested),
     {next_state, disconnected, clear_socket(State), reply_action(From, ok)};
@@ -201,6 +202,44 @@ request_timer(infinity, _Sid) ->
     undefined;
 request_timer(Timeout, Sid) ->
     erlang:send_after(Timeout, self(), {request_timeout, Sid}).
+
+flush_timer(infinity, _Ref) ->
+    undefined;
+flush_timer(Timeout, Ref) ->
+    erlang:send_after(Timeout, self(), {flush_timeout, Ref}).
+
+complete_flush(#{flushes := Flushes0} = State) ->
+    case queue:out(Flushes0) of
+        {{value, #{from := From, timer := Timer}}, Flushes} ->
+            cancel_flush_timer(Timer),
+            maybe_reply_flush(From, ok),
+            State#{flushes => Flushes};
+        {empty, Flushes} ->
+            State#{flushes => Flushes}
+    end.
+
+expire_flush(Ref, #{flushes := Flushes0} = State) ->
+    {Flushes, From} = expire_flush(Ref, queue:to_list(Flushes0), []),
+    maybe_reply_flush(From, {error, timeout}),
+    State#{flushes => queue:from_list(Flushes)}.
+
+expire_flush(_Ref, [], Acc) ->
+    {lists:reverse(Acc), undefined};
+expire_flush(Ref, [#{ref := Ref, from := From} = Flush | Rest], Acc) when From =/= undefined ->
+    {lists:reverse(Acc, [Flush#{from => undefined, timer => undefined} | Rest]), From};
+expire_flush(Ref, [Flush | Rest], Acc) ->
+    expire_flush(Ref, Rest, [Flush | Acc]).
+
+cancel_flush_timer(undefined) ->
+    ok;
+cancel_flush_timer(Timer) ->
+    _ = erlang:cancel_timer(Timer),
+    ok.
+
+maybe_reply_flush(undefined, _Reply) ->
+    ok;
+maybe_reply_flush(From, Reply) ->
+    gen_statem:reply(From, Reply).
 
 request_inbox() ->
     <<"_INBOX.enats.", (binary:encode_hex(crypto:strong_rand_bytes(16)))/binary>>.
@@ -237,7 +276,7 @@ process_frames([Frame | Rest], StateName, State0) ->
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
     Base = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, lang => <<"erlang">>, version => <<"0.1.0">>},
+        headers => true, lang => <<"erlang">>, version => <<"0.1.2">>},
     case maybe_upgrade_tls(Info, State) of
         {error, Reason} -> lost(waiting_info, {tls_upgrade_failed, Reason}, State);
         {ok, TransportState} -> process_connect_info(Info, Base, update_servers(Info, TransportState))
@@ -256,9 +295,8 @@ process_frame({error, Reason}, waiting_info, State) -> lost(waiting_info, {serve
 process_frame({error, Reason}, waiting_pong, State) -> lost(waiting_pong, {server_error, Reason}, State);
 process_frame({error, Reason}, connected, State) -> lost(connected, {server_error, Reason}, State);
 process_frame(ping, _StateName, State) -> ok = send_frame(pong, State), {keep_state, State, []};
-process_frame(pong, connected, #{flush_from := undefined} = State) -> {keep_state, State, []};
-process_frame(pong, connected, #{flush_from := From} = State) ->
-    {keep_state, State#{flush_from => undefined}, reply_action(From, ok)};
+process_frame(pong, connected, State) ->
+    {keep_state, complete_flush(State), []};
 process_frame(#{type := msg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
 process_frame(#{type := hmsg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
 process_frame(ok, _StateName, State) -> {keep_state, State, []};
@@ -386,7 +424,7 @@ deliver_subscription(Message, State) ->
 lost(_StateName, Reason, State) ->
     close(State),
     reply_connect(State, {error, Reason}),
-    reply_flush(State, {error, {disconnected, Reason}}),
+    reply_flushes(State, {error, {disconnected, Reason}}),
     reply_requests(State, {error, {disconnected, Reason}}),
     notify(State, disconnected, Reason),
     case maps:get(reconnect, maps:get(options, State)) of
@@ -399,8 +437,14 @@ lost_with_reply(From, Reason, State) ->
 
 reply_connect(#{connect_from := undefined}, _Reply) -> ok;
 reply_connect(#{connect_from := From}, Reply) -> gen_statem:reply(From, Reply).
-reply_flush(#{flush_from := undefined}, _Reply) -> ok;
-reply_flush(#{flush_from := From}, Reply) -> gen_statem:reply(From, Reply).
+reply_flushes(#{flushes := Flushes}, Reply) ->
+    lists:foreach(
+        fun(#{from := From, timer := Timer}) ->
+            cancel_flush_timer(Timer),
+            maybe_reply_flush(From, Reply)
+        end,
+        queue:to_list(Flushes)
+    ).
 reply_requests(#{requests := Requests}, Reply) ->
     maps:foreach(
         fun(_Sid, #{from := From, timer := Timer}) ->
@@ -426,7 +470,7 @@ reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
 
 clear_socket(State) ->
-    State#{socket => undefined, connect_from => undefined, flush_from => undefined, requests => #{}}.
+    State#{socket => undefined, connect_from => undefined, flushes => queue:new(), requests => #{}}.
 close(#{socket := undefined}) -> ok;
 close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
