@@ -8,7 +8,11 @@
 
 -define(TIMEOUT, 5000).
 
-start_link(Options) -> gen_statem:start_link(?MODULE, Options, []).
+start_link(Options) ->
+    case validate_options(Options) of
+        ok -> gen_statem:start_link(?MODULE, Options, []);
+        Error -> Error
+    end.
 connect(Pid) -> connect(Pid, ?TIMEOUT).
 connect(Pid, Timeout) -> safe_call(Pid, {connect, Timeout}, Timeout).
 disconnect(Pid) -> gen_statem:call(Pid, disconnect, ?TIMEOUT).
@@ -50,7 +54,9 @@ init(Options0) ->
         next_sid => 1,
         servers => maps:get(servers, Options),
         server_index => 1,
-        current_server => undefined
+        current_server => undefined,
+        heartbeat_timer => undefined,
+        pings_out => 0
     }}.
 
 disconnected({call, From}, connect, State) ->
@@ -169,13 +175,15 @@ connected({call, From}, {flush, Timeout}, State) ->
     case send_frame(ping, State) of
         ok ->
             Ref = make_ref(),
-            Flush = #{ref => Ref, from => From, timer => flush_timer(Timeout, Ref)},
+            Flush = #{kind => flush, ref => Ref, from => From, timer => flush_timer(Timeout, Ref)},
             Flushes = queue:in(Flush, maps:get(flushes, State)),
             {keep_state, State#{flushes => Flushes}, []};
         {error, Reason} -> lost_with_reply(From, Reason, State)
     end;
 connected(info, {flush_timeout, Ref}, State) ->
     {keep_state, expire_flush(Ref, State), []};
+connected(info, heartbeat, State) ->
+    heartbeat(State);
 connected({call, From}, disconnect, State) ->
     reply_flushes(State, {error, disconnected}),
     reply_requests(State, {error, disconnected}),
@@ -208,15 +216,47 @@ flush_timer(infinity, _Ref) ->
 flush_timer(Timeout, Ref) ->
     erlang:send_after(Timeout, self(), {flush_timeout, Ref}).
 
-complete_flush(#{flushes := Flushes0} = State) ->
+complete_pong(#{flushes := Flushes0} = State) ->
     case queue:out(Flushes0) of
-        {{value, #{from := From, timer := Timer}}, Flushes} ->
+        {{value, #{kind := flush, from := From, timer := Timer}}, Flushes} ->
             cancel_flush_timer(Timer),
             maybe_reply_flush(From, ok),
-            State#{flushes => Flushes};
+            State#{flushes => Flushes, pings_out => 0};
+        {{value, #{kind := heartbeat}}, Flushes} ->
+            State#{flushes => Flushes, pings_out => 0};
         {empty, Flushes} ->
-            State#{flushes => Flushes}
+            State#{flushes => Flushes, pings_out => 0}
     end.
+
+heartbeat(#{pings_out := PingsOut, options := Options} = State) ->
+    MaxPingsOut = maps:get(max_pings_out, Options),
+    case PingsOut >= MaxPingsOut of
+        true ->
+            lost(connected, stale_connection, State);
+        false ->
+            case send_frame(ping, State) of
+                ok ->
+                    Flushes = queue:in(#{kind => heartbeat}, maps:get(flushes, State)),
+                    {keep_state, schedule_heartbeat(State#{flushes => Flushes, pings_out => PingsOut + 1}), []};
+                {error, Reason} ->
+                    lost(connected, Reason, State)
+            end
+    end.
+
+start_heartbeat(#{options := #{ping_interval := Interval}} = State) when Interval > 0 ->
+    schedule_heartbeat(State);
+start_heartbeat(State) ->
+    State.
+
+schedule_heartbeat(#{options := #{ping_interval := Interval}, heartbeat_timer := Timer} = State) ->
+    cancel_timer(Timer),
+    State#{heartbeat_timer => erlang:send_after(Interval, self(), heartbeat)}.
+
+cancel_timer(undefined) ->
+    ok;
+cancel_timer(Timer) ->
+    _ = erlang:cancel_timer(Timer),
+    ok.
 
 expire_flush(Ref, #{flushes := Flushes0} = State) ->
     {Flushes, From} = expire_flush(Ref, queue:to_list(Flushes0), []),
@@ -276,7 +316,7 @@ process_frames([Frame | Rest], StateName, State0) ->
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
     Base = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, lang => <<"erlang">>, version => <<"0.1.2">>},
+        headers => true, no_responders => true, lang => <<"erlang">>, version => <<"0.1.3">>},
     case maybe_upgrade_tls(Info, State) of
         {error, Reason} -> lost(waiting_info, {tls_upgrade_failed, Reason}, State);
         {ok, TransportState} -> process_connect_info(Info, Base, update_servers(Info, TransportState))
@@ -290,13 +330,13 @@ process_frame(pong, waiting_pong, State) ->
     reply_connect(State, ok),
     restore_subscriptions(State),
     notify(State, connected, maps:get(server_info, State)),
-    {next_state, connected, State#{connect_from => undefined}, []};
+    {next_state, connected, start_heartbeat(State#{connect_from => undefined}), []};
 process_frame({error, Reason}, waiting_info, State) -> lost(waiting_info, {server_error, Reason}, State);
 process_frame({error, Reason}, waiting_pong, State) -> lost(waiting_pong, {server_error, Reason}, State);
 process_frame({error, Reason}, connected, State) -> lost(connected, {server_error, Reason}, State);
 process_frame(ping, _StateName, State) -> ok = send_frame(pong, State), {keep_state, State, []};
 process_frame(pong, connected, State) ->
-    {keep_state, complete_flush(State), []};
+    {keep_state, complete_pong(State), []};
 process_frame(#{type := msg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
 process_frame(#{type := hmsg} = Message, connected, State) -> {keep_state, deliver(Message, State), []};
 process_frame(ok, _StateName, State) -> {keep_state, State, []};
@@ -388,12 +428,17 @@ validate_publish_options(Payload, Options, State) ->
     Info = maps:get(server_info, State),
     MaxPayload = maps:get(max_payload, Info, infinity),
     Headers = maps:get(headers, Options, []),
-    case is_integer(MaxPayload) andalso byte_size(Payload) > MaxPayload of
-        true -> {error, {payload_too_large, MaxPayload}};
+    case Headers =/= [] andalso maps:get(headers, Info, true) =:= false of
+        true -> {error, headers_not_supported};
         false ->
-            case Headers =/= [] andalso maps:get(headers, Info, true) =:= false of
-                true -> {error, headers_not_supported};
-                false -> ok
+            case enats_frame:validate_headers(Headers) of
+                {error, _} = Error -> Error;
+                ok ->
+                    MessageSize = byte_size(Payload) + enats_frame:headers_size(Headers),
+                    case is_integer(MaxPayload) andalso MessageSize > MaxPayload of
+                        true -> {error, {payload_too_large, MaxPayload}};
+                        false -> ok
+                    end
             end
     end.
 
@@ -408,10 +453,18 @@ deliver(Message, State) ->
         {#{from := From, timer := Timer}, Requests} ->
             cancel_request_timer(Timer),
             _ = send_frame({unsub, Sid}, State),
-            gen_statem:reply(From, {ok, Message}),
+            gen_statem:reply(From, request_result(Message)),
             State#{requests => Requests};
         error -> deliver_subscription(Message, State)
     end.
+
+request_result(#{type := hmsg, payload := <<>>, headers := Headers} = Message) ->
+    case lists:keyfind(<<"Status">>, 1, Headers) of
+        {_, <<"503">> = Status} -> {error, {no_responders, Status}};
+        _ -> {ok, Message}
+    end;
+request_result(Message) ->
+    {ok, Message}.
 
 deliver_subscription(Message, State) ->
     Sid = maps:get(sid, Message),
@@ -439,9 +492,9 @@ reply_connect(#{connect_from := undefined}, _Reply) -> ok;
 reply_connect(#{connect_from := From}, Reply) -> gen_statem:reply(From, Reply).
 reply_flushes(#{flushes := Flushes}, Reply) ->
     lists:foreach(
-        fun(#{from := From, timer := Timer}) ->
-            cancel_flush_timer(Timer),
-            maybe_reply_flush(From, Reply)
+        fun(Flush) ->
+            cancel_flush_timer(maps:get(timer, Flush, undefined)),
+            maybe_reply_flush(maps:get(from, Flush, undefined), Reply)
         end,
         queue:to_list(Flushes)
     ).
@@ -470,13 +523,24 @@ reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
 
 clear_socket(State) ->
-    State#{socket => undefined, connect_from => undefined, flushes => queue:new(), requests => #{}}.
+    cancel_timer(maps:get(heartbeat_timer, State, undefined)),
+    State#{socket => undefined, connect_from => undefined, flushes => queue:new(), requests => #{},
+        heartbeat_timer => undefined, pings_out => 0}.
 close(#{socket := undefined}) -> ok;
 close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
+validate_options(Options) when is_map(Options) ->
+    case maps:get(tls_handshake, Options, starttls) of
+        starttls -> ok;
+        first -> ok;
+        Value -> {error, {invalid_option, tls_handshake, Value}}
+    end;
+validate_options(Options) ->
+    {error, {invalid_options, Options}}.
+
 normalize_options(Options) -> maps:merge(#{host => "127.0.0.1", port => 4222, tls => false, ssl_opts => [],
     tls_handshake => starttls, connect_timeout => 5000, reconnect => false, reconnect_delay => 1000,
-    auth => none, owner => self(), notify => true},
+    auth => none, owner => self(), notify => true, ping_interval => 120000, max_pings_out => 2},
     normalize_servers(Options)).
 normalize_info(Info) ->
     maps:fold(fun(Key, Value, Acc) -> maps:put(info_key(Key), Value, Acc) end, #{}, Info).

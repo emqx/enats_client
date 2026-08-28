@@ -10,9 +10,11 @@
     t_flush_disconnects_all_waiters/1,
     t_headers/1, t_frame_variants/1, t_auth_helpers/1, t_nkey_helpers/1,
     t_secret_and_subject/1, t_invalid_subject/1, t_lazy_secret/1,
+    t_invalid_options/1, t_canonical_no_responders/1, t_invalid_headers/1,
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
     t_fake_connection_paths/1,
-    t_reconnect/1, t_disconnect_while_connecting/1, t_topology_info/1, t_server_failover/1,
+    t_reconnect/1, t_stale_connection_reconnect/1, t_disconnect_while_connecting/1,
+    t_topology_info/1, t_server_failover/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
     t_request_timeout_cleanup/1, t_jetstream_no_responders/1, t_jetstream_json_unavailable/1,
     t_tls_downgrade_rejected/1, t_tls_first/1, t_request_infinity/1]).
@@ -22,9 +24,11 @@ all() ->
         t_default_owner, t_connect_idempotence, t_coalesced_flush, t_server_limits, t_flush_concurrency,
         t_flush_timeout_preserves_pong_order, t_flush_disconnects_all_waiters, t_headers,
         t_frame_variants, t_auth_helpers, t_nkey_helpers, t_secret_and_subject,
-        t_invalid_subject, t_lazy_secret, t_user_password, t_tls, t_connection_errors,
+        t_invalid_subject, t_lazy_secret, t_invalid_options, t_canonical_no_responders,
+        t_invalid_headers, t_user_password, t_tls, t_connection_errors,
         t_connection_queries,
-        t_fake_connection_paths, t_reconnect, t_disconnect_while_connecting, t_topology_info,
+        t_fake_connection_paths, t_reconnect, t_stale_connection_reconnect,
+        t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
         t_request_timeout_cleanup, t_jetstream_no_responders, t_jetstream_json_unavailable,
@@ -71,6 +75,35 @@ t_frame_edges(_Config) ->
         headers => [], payload => <<>>}], Frames4),
     _ = enats_frame:serialize_connect(#{<<"binary-key">> => true}),
     ok.
+
+t_invalid_options(_Config) ->
+    ?assertEqual(
+        {error, {invalid_option, tls_handshake, typo}},
+        enats_client:start_link(#{tls => true, tls_handshake => typo})
+    ).
+
+t_canonical_no_responders(_Config) ->
+    Header = <<"NATS/1.0 503 No Responders\r\nNats-Subject: $JS.API.TEST\r\n\r\n">>,
+    Size = integer_to_binary(byte_size(Header)),
+    Frame = iolist_to_binary([
+        <<"HMSG _INBOX.test 1 ">>, Size, <<" ">>, Size, <<"\r\n">>, Header, <<"\r\n">>
+    ]),
+    {[#{headers := Headers, payload := <<>>}], _} = enats_frame:parse(
+        Frame, enats_frame:initial_state()
+    ),
+    ?assertEqual(<<"503">>, proplists:get_value(<<"Status">>, Headers)),
+    ?assertEqual(<<"No Responders">>, proplists:get_value(<<"Description">>, Headers)),
+    ?assertEqual(<<"$JS.API.TEST">>, proplists:get_value(<<"Nats-Subject">>, Headers)).
+
+t_invalid_headers(_Config) ->
+    ?assertEqual(
+        {error, {invalid_header_name, <<"bad:name">>}},
+        enats_frame:validate_headers([{<<"bad:name">>, <<"value">>}])
+    ),
+    ?assertEqual(
+        {error, {invalid_header_value, <<"x">>}},
+        enats_frame:validate_headers([{<<"x">>, <<"bad\r\nvalue">>}])
+    ).
 
 t_connect_publish_subscribe_flush(Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => ?config(port, Config), owner => self()}),
@@ -426,7 +459,7 @@ t_connection_queries(Config) ->
         enats_connection:publish(Client, <<"bad subject">>, <<"payload">>, #{})),
     ?assertEqual({error, {invalid_subject, invalid_subject}},
         enats_client:subscribe(Client, <<"bad subject">>, #{})),
-    ?assertEqual({error, timeout},
+    ?assertEqual({error, {no_responders, <<"503">>}},
         enats_client:request(Client, <<"no.reply">>, <<"payload">>, #{timeout => 20})),
     ?assertMatch({error, _}, enats_js:publish(self(), <<"subject">>, <<"payload">>, #{})),
     ?assertEqual({error, not_found}, enats_client:unsubscribe(Client, make_ref())),
@@ -465,6 +498,31 @@ t_reconnect(_Config) ->
     receive
         {enats_client, Client, connected, _Info} -> ok
     after 2000 -> ct:fail(reconnect_not_observed)
+    end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_stale_connection_reconnect(_Config) ->
+    {Server, Port} = start_fake_server(stale_reconnect),
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => Port,
+        reconnect => true,
+        reconnect_delay => 10,
+        ping_interval => 20,
+        max_pings_out => 1,
+        owner => self()
+    }),
+    ok = enats_client:connect(Client),
+    receive
+        {fake_stale_ping, Server} -> ok
+    after 1000 ->
+        ct:fail(stale_ping_not_seen)
+    end,
+    receive
+        {fake_server_reconnected, Server} -> ok
+    after 2000 ->
+        ct:fail(stale_connection_not_reconnected)
     end,
     ok = enats_client:stop(Client),
     exit(Server, normal).
@@ -775,6 +833,7 @@ fake_server(Parent, Mode) ->
     Parent ! {fake_server_ready, self(), Port},
     case Mode of
         reconnect -> fake_reconnect(Listener, Parent);
+        stale_reconnect -> fake_stale_reconnect(Listener, Parent);
         _ ->
             {ok, Socket} = gen_tcp:accept(Listener),
             Parent ! {fake_server_accepted, self(), Mode},
@@ -903,6 +962,23 @@ fake_reconnect(Listener, Parent) ->
     gen_tcp:close(Second),
     gen_tcp:close(Listener).
 
+fake_stale_reconnect(Listener, Parent) ->
+    {ok, First} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(First, fake_info()),
+    {ok, InitialData} = gen_tcp:recv(First, 0, 1000),
+    ok = gen_tcp:send(First, <<"PONG\r\n">>),
+    {ok, _} = recv_until_nth(First, <<"PING\r\n">>, 2, InitialData),
+    Parent ! {fake_stale_ping, self()},
+    wait_socket_closed(First),
+    {ok, Second} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(Second, fake_info()),
+    {ok, _SecondData} = gen_tcp:recv(Second, 0, 1000),
+    ok = gen_tcp:send(Second, <<"PONG\r\n">>),
+    Parent ! {fake_server_reconnected, self()},
+    timer:sleep(100),
+    gen_tcp:close(Second),
+    gen_tcp:close(Listener).
+
 fake_info() ->
     <<"INFO {\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n">>.
 
@@ -920,4 +996,22 @@ recv_until(Socket, Needle, Acc) ->
                 Error -> Error
             end;
         _ -> {ok, Acc}
+    end.
+
+recv_until_nth(Socket, Needle, N, Acc) ->
+    case length(binary:matches(Acc, Needle)) >= N of
+        true -> {ok, Acc};
+        false ->
+            case gen_tcp:recv(Socket, 0, 1000) of
+                {ok, Data} -> recv_until_nth(Socket, Needle, N, <<Acc/binary, Data/binary>>);
+                Error -> Error
+            end
+    end.
+
+wait_socket_closed(Socket) ->
+    case gen_tcp:recv(Socket, 0, 100) of
+        {error, closed} -> ok;
+        {ok, _Data} -> wait_socket_closed(Socket);
+        {error, timeout} -> wait_socket_closed(Socket);
+        Error -> ct:fail({unexpected_socket_result, Error})
     end.
