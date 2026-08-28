@@ -316,7 +316,7 @@ process_frames([Frame | Rest], StateName, State0) ->
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
     Base0 = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, lang => <<"erlang">>, version => <<"0.1.4">>},
+        headers => true, lang => <<"erlang">>, version => <<"0.1.5">>},
     Base = case maps:get(headers, Info, false) of
         true -> Base0#{no_responders => true};
         false -> Base0
@@ -535,12 +535,24 @@ close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
 validate_options(Options) when is_map(Options) ->
     case maps:get(tls_handshake, Options, starttls) of
-        starttls -> ok;
-        first -> ok;
+        starttls -> validate_heartbeat_options(Options);
+        first -> validate_heartbeat_options(Options);
         Value -> {error, {invalid_option, tls_handshake, Value}}
     end;
 validate_options(Options) ->
     {error, {invalid_options, Options}}.
+
+validate_heartbeat_options(Options) ->
+    PingInterval = maps:get(ping_interval, Options, 120000),
+    MaxPingsOut = maps:get(max_pings_out, Options, 2),
+    case is_integer(PingInterval) andalso PingInterval >= 0 of
+        false -> {error, {invalid_option, ping_interval, PingInterval}};
+        true ->
+            case is_integer(MaxPingsOut) andalso MaxPingsOut > 0 of
+                true -> ok;
+                false -> {error, {invalid_option, max_pings_out, MaxPingsOut}}
+            end
+    end.
 
 normalize_options(Options) -> maps:merge(#{host => "127.0.0.1", port => 4222, tls => false, ssl_opts => [],
     tls_handshake => starttls, connect_timeout => 5000, reconnect => false, reconnect_delay => 1000,

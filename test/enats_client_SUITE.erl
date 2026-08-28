@@ -80,6 +80,14 @@ t_invalid_options(_Config) ->
     ?assertEqual(
         {error, {invalid_option, tls_handshake, typo}},
         enats_client:start_link(#{tls => true, tls_handshake => typo})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, ping_interval, bad}},
+        enats_client:start_link(#{ping_interval => bad})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, max_pings_out, 0}},
+        enats_client:start_link(#{max_pings_out => 0})
     ).
 
 t_canonical_no_responders(_Config) ->
