@@ -315,8 +315,12 @@ process_frames([Frame | Rest], StateName, State0) ->
 
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
-    Base = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, no_responders => true, lang => <<"erlang">>, version => <<"0.1.3">>},
+    Base0 = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
+        headers => true, lang => <<"erlang">>, version => <<"0.1.4">>},
+    Base = case maps:get(headers, Info, false) of
+        true -> Base0#{no_responders => true};
+        false -> Base0
+    end,
     case maybe_upgrade_tls(Info, State) of
         {error, Reason} -> lost(waiting_info, {tls_upgrade_failed, Reason}, State);
         {ok, TransportState} -> process_connect_info(Info, Base, update_servers(Info, TransportState))
