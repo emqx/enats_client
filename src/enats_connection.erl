@@ -48,6 +48,8 @@ init(Options0) ->
         parse_state => enats_frame:initial_state(),
         server_info => #{},
         connect_from => undefined,
+        connect_attempts => 0,
+        pending_connect_timeout => undefined,
         flushes => queue:new(),
         subscriptions => #{},
         requests => #{},
@@ -70,18 +72,24 @@ disconnected({call, From}, _Request, _State) -> reply(From, {error, disconnected
 disconnected(_, _, State) -> keep(State).
 
 connect_call(From, Timeout, State) ->
-    case open_socket(State) of
+    Options = maps:get(options, State),
+    Attempts = length(maps:get(servers, State)),
+    State0 = State#{connect_from => From, connect_attempts => Attempts,
+        pending_connect_timeout => Timeout},
+    case open_socket(State0, Attempts, Options, Timeout) of
         {ok, Socket, State1} ->
-            {next_state, waiting_info, State1#{socket => Socket, connect_from => From,
+            {next_state, waiting_info, State1#{socket => Socket,
+                connect_attempts => max(Attempts - 1, 0),
                 parse_state => enats_frame:initial_state()}, [{state_timeout, Timeout, connect_timeout}]};
-        {error, Reason, State1} -> {keep_state, State1, reply_action(From, {error, Reason})}
+        {error, Reason, State1} ->
+            {keep_state, clear_pending_connect(State1), reply_action(From, {error, Reason})}
     end.
 
 waiting_info(info, {tcp, Socket, Data}, #{socket := {tcp, Socket}} = State) -> process_data(Data, waiting_info, State);
 waiting_info(info, {ssl, Socket, Data}, #{socket := {ssl, Socket}} = State) -> process_data(Data, waiting_info, State);
-waiting_info(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) -> lost(waiting_info, closed, State);
-waiting_info(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) -> lost(waiting_info, closed, State);
-waiting_info(state_timeout, connect_timeout, State) -> lost(waiting_info, timeout, State);
+waiting_info(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) -> connect_failed(waiting_info, closed, State);
+waiting_info(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) -> connect_failed(waiting_info, closed, State);
+waiting_info(state_timeout, connect_timeout, State) -> connect_failed(waiting_info, timeout, State);
 waiting_info({call, From}, status, _State) -> reply(From, connecting);
 waiting_info({call, From}, disconnect, State) ->
     reply_connect(State, {error, disconnected}),
@@ -93,9 +101,9 @@ waiting_info(_, _, State) -> keep(State).
 
 waiting_pong(info, {tcp, Socket, Data}, #{socket := {tcp, Socket}} = State) -> process_data(Data, waiting_pong, State);
 waiting_pong(info, {ssl, Socket, Data}, #{socket := {ssl, Socket}} = State) -> process_data(Data, waiting_pong, State);
-waiting_pong(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) -> lost(waiting_pong, closed, State);
-waiting_pong(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) -> lost(waiting_pong, closed, State);
-waiting_pong(state_timeout, connect_timeout, State) -> lost(waiting_pong, timeout, State);
+waiting_pong(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) -> connect_failed(waiting_pong, closed, State);
+waiting_pong(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) -> connect_failed(waiting_pong, closed, State);
+waiting_pong(state_timeout, connect_timeout, State) -> connect_failed(waiting_pong, timeout, State);
 waiting_pong({call, From}, status, _State) -> reply(From, connecting);
 waiting_pong({call, From}, disconnect, State) ->
     reply_connect(State, {error, disconnected}),
@@ -316,13 +324,13 @@ process_frames([Frame | Rest], StateName, State0) ->
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
     Base0 = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, lang => <<"erlang">>, version => <<"0.1.6">>},
+        headers => true, lang => <<"erlang">>, version => <<"0.1.9">>},
     Base = case maps:get(headers, Info, false) of
         true -> Base0#{no_responders => true};
         false -> Base0
     end,
     case maybe_upgrade_tls(Info, State) of
-        {error, Reason} -> lost(waiting_info, {tls_upgrade_failed, Reason}, State);
+        {error, Reason} -> connect_failed(waiting_info, {tls_upgrade_failed, Reason}, State);
         {ok, TransportState} -> process_connect_info(Info, Base, update_servers(Info, TransportState))
     end;
 process_frame({info, RawInfo}, connected, State) ->
@@ -334,9 +342,9 @@ process_frame(pong, waiting_pong, State) ->
     reply_connect(State, ok),
     restore_subscriptions(State),
     notify(State, connected, maps:get(server_info, State)),
-    {next_state, connected, start_heartbeat(State#{connect_from => undefined}), []};
-process_frame({error, Reason}, waiting_info, State) -> lost(waiting_info, {server_error, Reason}, State);
-process_frame({error, Reason}, waiting_pong, State) -> lost(waiting_pong, {server_error, Reason}, State);
+    {next_state, connected, start_heartbeat(clear_pending_connect(State)), []};
+process_frame({error, Reason}, waiting_info, State) -> connect_failed(waiting_info, {server_error, Reason}, State);
+process_frame({error, Reason}, waiting_pong, State) -> connect_failed(waiting_pong, {server_error, Reason}, State);
 process_frame({error, Reason}, connected, State) -> lost(connected, {server_error, Reason}, State);
 process_frame(ping, _StateName, State) -> ok = send_frame(pong, State), {keep_state, State, []};
 process_frame(pong, connected, State) ->
@@ -358,26 +366,42 @@ process_connect_info(Info, Base, State) ->
             ok = send_frame({connect, Params}, State),
             ok = send_frame(ping, State),
             {next_state, waiting_pong, State#{server_info => Info}, []};
-        {error, Reason} -> lost(waiting_info, Reason, State)
+        {error, Reason} -> connect_failed(waiting_info, Reason, State)
     end.
+
+connect_failed(StateName, _Reason, #{connect_from := From, connect_attempts := Attempts} = State)
+    when From =/= undefined, Attempts > 0 ->
+    close(State),
+    Timeout = maps:get(pending_connect_timeout, State),
+    State0 = reset_transport(State),
+    case open_socket(State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout) of
+        {ok, Socket, State1} ->
+            {next_state, waiting_info, State1#{socket => Socket,
+                connect_attempts => Attempts - 1,
+                parse_state => enats_frame:initial_state()},
+                [{state_timeout, Timeout, connect_timeout}]};
+        {error, NextReason, State1} ->
+            lost(StateName, NextReason, State1)
+    end;
+connect_failed(StateName, Reason, State) ->
+    lost(StateName, Reason, State).
 
 open_socket(State) ->
     Options = maps:get(options, State),
     Servers = maps:get(servers, State),
-    open_socket(State, length(Servers), Options).
+    open_socket(State, length(Servers), Options, maps:get(connect_timeout, Options)).
 
-open_socket(State, 0, _Options) ->
+open_socket(State, 0, _Options, _Timeout) ->
     {error, no_servers_available, State};
-open_socket(State, Attempts, Options) ->
+open_socket(State, Attempts, Options, Timeout) ->
     Servers = maps:get(servers, State),
     Index = maps:get(server_index, State),
     {Host, Port} = lists:nth(Index, Servers),
     NextIndex = next_server_index(Index, length(Servers)),
     State1 = State#{server_index => NextIndex, current_server => {Host, Port}},
-    Timeout = maps:get(connect_timeout, Options),
     case open_transport(Host, Port, Options, Timeout) of
         {ok, Socket} -> {ok, Socket, State1};
-        {error, _Reason} when Attempts > 1 -> open_socket(State1, Attempts - 1, Options);
+        {error, _Reason} when Attempts > 1 -> open_socket(State1, Attempts - 1, Options, Timeout);
         {error, Reason} -> {error, Reason, State1}
     end.
 
@@ -531,9 +555,17 @@ reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
 
 clear_socket(State) ->
+    clear_pending_connect(reset_transport(State)).
+
+clear_pending_connect(State) ->
+    State#{connect_from => undefined, connect_attempts => 0,
+        pending_connect_timeout => undefined}.
+
+reset_transport(State) ->
     cancel_timer(maps:get(heartbeat_timer, State, undefined)),
-    State#{socket => undefined, connect_from => undefined, flushes => queue:new(), requests => #{},
-        heartbeat_timer => undefined, pings_out => 0}.
+    State#{socket => undefined, flushes => queue:new(), requests => #{},
+        heartbeat_timer => undefined, pings_out => 0,
+        parse_state => enats_frame:initial_state()}.
 close(#{socket := undefined}) -> ok;
 close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).

@@ -15,7 +15,7 @@
     t_user_password/1, t_tls/1, t_connection_errors/1, t_connection_queries/1,
     t_fake_connection_paths/1,
     t_reconnect/1, t_stale_connection_reconnect/1, t_disconnect_while_connecting/1,
-    t_topology_info/1, t_server_failover/1,
+    t_topology_info/1, t_server_failover/1, t_server_failover_handshake/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
     t_credentials_file_provider/1,
     t_request_timeout_cleanup/1, t_jetstream_no_responders/1, t_jetstream_json_unavailable/1,
@@ -32,7 +32,7 @@ all() ->
         t_connection_queries,
         t_fake_connection_paths, t_reconnect, t_stale_connection_reconnect,
         t_disconnect_while_connecting, t_topology_info,
-        t_server_failover,
+        t_server_failover, t_server_failover_handshake,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
         t_credentials_file_provider,
         t_request_timeout_cleanup, t_jetstream_no_responders, t_jetstream_json_unavailable,
@@ -607,6 +607,23 @@ t_server_failover(Config) ->
     ?assertEqual(connected, enats_client:status(Client)),
     ok = enats_client:stop(Client).
 
+t_server_failover_handshake(_Config) ->
+    {SilentServer, SilentPort} = start_fake_server(silent),
+    {HealthyServer, HealthyPort} = start_fake_server(server_limits),
+    {ok, Client} = enats_client:start_link(#{
+        servers => [{"127.0.0.1", SilentPort}, {"127.0.0.1", HealthyPort}],
+        connect_timeout => 100,
+        owner => self()
+    }),
+    try
+        ok = enats_client:connect(Client, 200),
+        ?assertEqual(connected, enats_client:status(Client))
+    after
+        ok = enats_client:stop(Client),
+        exit(SilentServer, normal),
+        exit(HealthyServer, normal)
+    end.
+
 t_nkey_nats_server(Config) ->
     case nats_server_executable() of
         unavailable -> {skip, "nats-server executable is unavailable"};
@@ -711,7 +728,8 @@ t_nkey_seed(_Config) ->
         "-----BEGIN USER NKEY SEED-----\n", Seed,
         "\n------END USER NKEY SEED------\n"
     ]),
-    {ok, CredsAuth} = enats_credentials:from_binary(Creds),
+    ok = enats_credentials:from_binary(Creds),
+    CredsAuth = #{mechanism => credentials, provider => fun() -> {ok, Creds} end},
     {ok, CredsParams} = enats_auth:connect_params(CredsAuth, #{nonce => <<"nonce">>}, #{}),
     ?assertEqual(<<"jwt">>, maps:get(jwt, CredsParams)),
     ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).

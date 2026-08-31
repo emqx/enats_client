@@ -36,7 +36,8 @@ For standard `.creds` authentication, use
 `enats_credentials:from_file/1` and pass the returned authentication map to
 the client. The file is read and parsed on every connection and reconnect;
 only its path is retained in client state. `enats_credentials:from_binary/1`
-validates inline credentials and returns an equivalent provider map.
+is a one-shot validator for inline credentials; callers that need inline
+credentials for reconnects must provide their own lazy provider.
 
 The credentials parser follows the standard NATS `.creds` format, including
 the JWT and user NKey seed blocks. TLS is strict when enabled:

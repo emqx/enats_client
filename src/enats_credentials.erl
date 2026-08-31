@@ -12,12 +12,7 @@ validate_file(Filename) ->
     end.
 
 from_binary(Contents) when is_binary(Contents) ->
-    case validate(Contents) of
-        ok ->
-            {ok, #{mechanism => credentials, provider => fun() -> {ok, Contents} end}};
-        {error, _} = Error ->
-            Error
-    end.
+    validate(Contents).
 
 validate(Contents) when is_binary(Contents) ->
     try
