@@ -53,8 +53,9 @@ decode_headers(Header) ->
                 invalid -> [];
                 StatusHeaders ->
                     StatusHeaders ++ [
-                        {Key, Value}
-                     || Line <- Lines, Line =/= <<>>, {Key, Value} <- [split_header(Line)]
+                        ParsedHeader
+                     || Line <- Lines, Line =/= <<>>,
+                        {ok, ParsedHeader} <- [split_header(Line)]
                     ]
             end;
         _ ->
@@ -73,10 +74,15 @@ status_headers(_) -> invalid.
 join_words(Words) -> iolist_to_binary(lists:join(<<" ">>, Words)).
 
 split_header(Line) ->
-    case binary:split(Line, <<": ">>) of
-        [Key, Value] -> {Key, Value};
-        [Key] -> {Key, <<>>}
+    case binary:split(Line, <<":">>) of
+        [Key, Value] -> {ok, {Key, trim_leading_ows(Value)}};
+        [_] -> error
     end.
+
+trim_leading_ows(<<Char, Rest/binary>>) when Char =:= $\s; Char =:= $\t ->
+    trim_leading_ows(Rest);
+trim_leading_ows(Value) ->
+    Value.
 
 to_int(Bin) -> binary_to_integer(Bin).
 

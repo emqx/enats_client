@@ -4,7 +4,8 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([t_frame_fragmentation/1, t_frame_invalid/1, t_frame_edges/1, t_connect_publish_subscribe_flush/1,
+-export([t_frame_fragmentation/1, t_frame_invalid/1, t_frame_edges/1, t_ipv6_connection/1,
+    t_connect_publish_subscribe_flush/1,
     t_default_owner/1, t_connect_idempotence/1, t_coalesced_flush/1, t_server_limits/1,
     t_flush_concurrency/1, t_flush_timeout_preserves_pong_order/1,
     t_flush_disconnects_all_waiters/1,
@@ -20,7 +21,8 @@
     t_tls_downgrade_rejected/1, t_tls_first/1, t_request_infinity/1]).
 
 all() ->
-    [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_connect_publish_subscribe_flush,
+    [t_frame_fragmentation, t_frame_invalid, t_frame_edges, t_ipv6_connection,
+        t_connect_publish_subscribe_flush,
         t_default_owner, t_connect_idempotence, t_coalesced_flush, t_server_limits, t_flush_concurrency,
         t_flush_timeout_preserves_pong_order, t_flush_disconnects_all_waiters, t_headers,
         t_frame_variants, t_auth_helpers, t_nkey_helpers, t_secret_and_subject,
@@ -73,8 +75,28 @@ t_frame_edges(_Config) ->
     {Frames4, _} = enats_frame:parse(<<"HMSG foo 1 3 3\r\nbad\r\n">>, enats_frame:initial_state()),
     ?assertEqual([#{type => hmsg, subject => <<"foo">>, sid => <<"1">>, header_size => 3,
         headers => [], payload => <<>>}], Frames4),
+    {Frames5, _} = enats_frame:parse(
+        <<"HMSG foo 1 26 26\r\nNATS/1.0\r\nX-Test:value\r\n\r\n\r\n">>,
+        enats_frame:initial_state()
+    ),
+    ?assertEqual(
+        [#{type => hmsg, subject => <<"foo">>, sid => <<"1">>, header_size => 26,
+            headers => [{<<"X-Test">>, <<"value">>}], payload => <<>>}],
+        Frames5
+    ),
     _ = enats_frame:serialize_connect(#{<<"binary-key">> => true}),
     ok.
+
+t_ipv6_connection(_Config) ->
+    {Server, Port} = start_fake_server(ipv6),
+    {ok, Client} = enats_client:start_link(#{
+        servers => [{{0, 0, 0, 0, 0, 0, 0, 1}, Port}],
+        owner => self()
+    }),
+    ok = enats_client:connect(Client),
+    ?assertEqual(connected, enats_client:status(Client)),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
 
 t_invalid_options(_Config) ->
     ?assertEqual(
@@ -836,7 +858,11 @@ start_fake_server(Mode) ->
     end.
 
 fake_server(Parent, Mode) ->
-    {ok, Listener} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    ListenOpts = case Mode of
+        ipv6 -> [inet6, binary, {active, false}, {reuseaddr, true}];
+        _ -> [binary, {active, false}, {reuseaddr, true}]
+    end,
+    {ok, Listener} = gen_tcp:listen(0, ListenOpts),
     {ok, {_Address, Port}} = inet:sockname(Listener),
     Parent ! {fake_server_ready, self(), Port},
     case Mode of
@@ -931,6 +957,9 @@ fake_server(Parent, Mode) ->
                     timer:sleep(100);
                 tls_unavailable ->
                     timer:sleep(100);
+                ipv6 ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    timer:sleep(50);
                 jetstream_json_unavailable ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, SubData0} = recv_until(Socket, <<"SUB ">>, <<>>),

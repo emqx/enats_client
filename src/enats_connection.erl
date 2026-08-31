@@ -385,9 +385,13 @@ tcp_result({ok, Socket}) -> {ok, {tcp, Socket}};
 tcp_result(Error) -> Error.
 
 open_transport(Host, Port, #{tls := true, tls_handshake := first, ssl_opts := SslOpts}, Timeout) ->
-    ssl_result(ssl:connect(Host, Port, [binary, {active, true}, {server_name_indication, Host} | SslOpts], Timeout));
+    ssl_result(ssl:connect(Host, Port, transport_options(Host, [
+        binary, {active, true}, {server_name_indication, tls_server_name(Host)}
+    ] ++ SslOpts), Timeout));
 open_transport(Host, Port, _Options, Timeout) ->
-    tcp_result(gen_tcp:connect(Host, Port, [binary, {active, true}, {nodelay, true}], Timeout)).
+    tcp_result(gen_tcp:connect(Host, Port, transport_options(Host, [
+        binary, {active, true}, {nodelay, true}
+    ]), Timeout)).
 
 ssl_result({ok, Socket}) -> {ok, {ssl, Socket}};
 ssl_result(Error) -> Error.
@@ -399,8 +403,8 @@ maybe_upgrade_tls(Info, #{socket := {tcp, Socket}, options := Options, current_s
         {false, false} -> {ok, State};
         {true, true} ->
             _ = inet:setopts(Socket, [{active, false}]),
-            SslOpts = [{active, true}, {server_name_indication, Host} |
-                maps:get(ssl_opts, Options)],
+            SslOpts = transport_options(Host, [{active, true},
+                {server_name_indication, tls_server_name(Host)} | maps:get(ssl_opts, Options)]),
             case ssl:connect(Socket, SslOpts, maps:get(connect_timeout, Options)) of
                 {ok, SslSocket} -> {ok, State#{socket => {ssl, SslSocket}}};
                 Error -> Error
@@ -604,11 +608,37 @@ parse_server_url(Url0) when is_binary(Url0) -> parse_server_url(binary_to_list(U
 parse_server_url("nats://" ++ Address) -> parse_host_port(Address);
 parse_server_url(Address) when is_list(Address) -> parse_host_port(Address).
 
+parse_host_port([$[ | Rest]) ->
+    case string:split(Rest, "]", leading) of
+        [Host, [$: | Port]] -> parse_host_port_value(Host, Port);
+        _ -> {error, invalid_server_url}
+    end;
 parse_host_port(Address) ->
     case string:split(Address, ":", trailing) of
-        [Host, Port] ->
-            try {ok, {Host, list_to_integer(Port)}} catch _:_ -> {error, invalid_server_url} end;
+        [Host, Port] -> parse_host_port_value(Host, Port);
         _ -> {error, invalid_server_url}
     end.
+
+parse_host_port_value(Host, Port0) ->
+    try
+        Port = list_to_integer(Port0),
+        true = Port > 0 andalso Port =< 65535,
+        case inet:parse_address(Host) of
+            {ok, Address} -> {ok, {Address, Port}};
+            {error, _} -> {ok, {Host, Port}}
+        end
+    catch
+        _:_ -> {error, invalid_server_url}
+    end.
+
+transport_options(Host, Options) when is_tuple(Host), tuple_size(Host) =:= 8 ->
+    [inet6 | Options];
+transport_options(_Host, Options) ->
+    Options.
+
+tls_server_name(Host) when is_tuple(Host) ->
+    inet:ntoa(Host);
+tls_server_name(Host) ->
+    Host.
 
 unique_servers(Servers) -> lists:usort(Servers).
