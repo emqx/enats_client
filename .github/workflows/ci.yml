@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    name: OTP ${{ matrix.otp }}
+    name: OTP ${{ matrix.otp }} / NATS ${{ matrix.nats }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

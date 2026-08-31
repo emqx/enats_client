@@ -53,7 +53,11 @@
     t_diagnostics/1,
     t_drain/1,
     t_parser_limits/1,
-    t_slow_consumer/1
+    t_slow_consumer/1,
+    t_protocol_input_safety/1,
+    t_drain_clears_state/1,
+    t_connect_deadline/1,
+    t_owner_down/1
 ]).
 
 all() ->
@@ -106,7 +110,11 @@ all() ->
         t_diagnostics,
         t_drain,
         t_parser_limits,
-        t_slow_consumer
+        t_slow_consumer,
+        t_protocol_input_safety,
+        t_drain_clears_state,
+        t_connect_deadline,
+        t_owner_down
     ].
 
 init_per_suite(Config) ->
@@ -225,6 +233,21 @@ t_invalid_options(_Config) ->
     ?assertEqual(
         {error, {invalid_option, socket_active_n, 32768}},
         enats_client:start_link(#{socket_active_n => 32768})
+    ),
+    ?assertEqual({error, {invalid_option, tls, bad}}, enats_client:start_link(#{tls => bad})),
+    ?assertEqual({error, {invalid_option, port, 0}}, enats_client:start_link(#{port => 0})),
+    ?assertEqual({error, {invalid_option, owner, bad}}, enats_client:start_link(#{owner => bad})),
+    ?assertEqual(
+        {error, {invalid_option, jitter, 2}},
+        enats_client:start_link(#{reconnect => #{jitter => 2}})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, reconnect_delay_range, {200, 100}}},
+        enats_client:start_link(#{reconnect => #{min_delay => 200, max_delay => 100}})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, max_parser_buffer, 0}},
+        enats_client:start_link(#{max_parser_buffer => 0})
     ).
 
 t_invalid_public_inputs(Config) ->
@@ -251,7 +274,7 @@ t_invalid_public_inputs(Config) ->
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, invalid_options},
+        {error, {invalid_option, msg_id}},
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, #{msg_id => 42})
     ),
     ?assertEqual(
@@ -305,7 +328,10 @@ t_parser_limits(_Config) ->
     LongLine = binary:copy(<<"x">>, 4097),
     ?assertError(control_line_too_long, enats_frame:parse(LongLine, enats_frame:initial_state())),
     HugeLine = binary:copy(<<"x">>, 8 * 1024 * 1024 + 1),
-    ?assertError(parser_buffer_limit, enats_frame:parse(HugeLine, enats_frame:initial_state())).
+    ?assertError(parser_buffer_limit, enats_frame:parse(HugeLine, enats_frame:initial_state())),
+    Custom = enats_frame:initial_state(#{max_control_line => 8, max_parser_buffer => 32}),
+    ?assertError(control_line_too_long, enats_frame:parse(<<"123456789">>, Custom)),
+    ?assertError(parser_buffer_limit, enats_frame:parse(binary:copy(<<"x">>, 33), Custom)).
 
 t_slow_consumer(Config) ->
     SlowOwner = spawn(fun slow_owner/0),
@@ -325,6 +351,73 @@ t_slow_consumer(Config) ->
     ?assertEqual(0, maps:get(subscriptions, enats_client:stats(Client))),
     ok = enats_client:stop(Client),
     exit(SlowOwner, kill).
+
+t_protocol_input_safety(Config) ->
+    {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, {invalid_option, reply_to}},
+        enats_client:publish(Client, <<"safe.test">>, <<"payload">>, #{
+            reply_to => <<"reply\r\nPING">>
+        })
+    ),
+    ?assertEqual(
+        {error, {invalid_option, queue_group}},
+        enats_client:subscribe(Client, <<"safe.test">>, #{queue_group => <<"queue\r\nPING">>})
+    ),
+    ?assertEqual(true, is_process_alive(Client)),
+    ok = enats_client:stop(Client).
+
+t_drain_clears_state(Config) ->
+    {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
+    ok = enats_client:connect(Client),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"drain.reconnect">>, #{}),
+    ok = enats_client:drain(Client, 1000),
+    ?assertEqual(0, maps:get(subscriptions, enats_client:stats(Client))),
+    ok = enats_client:connect(Client),
+    ?assertEqual(0, maps:get(subscriptions, enats_client:stats(Client))),
+    ok = enats_client:stop(Client).
+
+t_connect_deadline(_Config) ->
+    {FirstServer, FirstPort} = start_fake_server(silent),
+    {SecondServer, SecondPort} = start_fake_server(silent),
+    {ok, Client} = enats_client:start_link(#{
+        servers => [{"127.0.0.1", FirstPort}, {"127.0.0.1", SecondPort}],
+        owner => self()
+    }),
+    StartedAt = erlang:monotonic_time(millisecond),
+    Result = enats_client:connect(Client, 100),
+    Elapsed = erlang:monotonic_time(millisecond) - StartedAt,
+    ?assertMatch({error, _}, Result),
+    ?assert(Elapsed < 170),
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    ok = enats_client:stop(Client),
+    exit(FirstServer, normal),
+    exit(SecondServer, normal).
+
+t_owner_down(Config) ->
+    Owner = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
+    ok = enats_client:connect(Client),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"owner.down">>, #{owner => Owner}),
+    exit(Owner, kill),
+    wait_for_subscription_count(Client, 0, 20),
+    ok = enats_client:stop(Client).
+
+wait_for_subscription_count(Client, Expected, Attempts) ->
+    case maps:get(subscriptions, enats_client:stats(Client)) of
+        Expected ->
+            ok;
+        _ when Attempts > 0 ->
+            timer:sleep(10),
+            wait_for_subscription_count(Client, Expected, Attempts - 1);
+        Actual ->
+            ct:fail({subscription_count_not_updated, Actual})
+    end.
 
 slow_owner() ->
     receive
@@ -764,9 +857,13 @@ t_tls(Config) ->
                     PrivDir = ?config(priv_dir, Config),
                     Port = dynamic_port(),
                     PidFile = filename:join(PrivDir, "nats-tls.pid"),
+                    CaFile = filename:join(PrivDir, "nats-test-ca.crt"),
+                    CaKeyFile = filename:join(PrivDir, "nats-test-ca.key"),
                     CertFile = filename:join(PrivDir, "nats-tls.crt"),
                     KeyFile = filename:join(PrivDir, "nats-tls.key"),
-                    generate_test_certificate(CertFile, KeyFile),
+                    ExtFile = filename:join(PrivDir, "nats-tls.ext"),
+                    generate_test_ca(CaFile, CaKeyFile),
+                    generate_signed_certificate(CaFile, CaKeyFile, CertFile, KeyFile, ExtFile),
                     Server = start_nats_process([
                         "-a",
                         "127.0.0.1",
@@ -790,6 +887,7 @@ t_tls(Config) ->
                         }),
                         ?assertMatch({error, _}, enats_client:connect(SecureClient)),
                         ok = enats_client:stop(SecureClient),
+                        verify_peer_tls_case(Port, CaFile, CertFile),
                         tls_case(Port)
                     after
                         stop_nats_server(Server, PidFile)
@@ -898,6 +996,68 @@ generate_test_certificate(CertFile, KeyFile) ->
     _ = os:cmd(Command),
     {ok, _} = file:read_file(CertFile),
     {ok, _} = file:read_file(KeyFile),
+    ok.
+
+generate_test_ca(CaFile, CaKeyFile) ->
+    Command = lists:flatten(
+        io_lib:format(
+            "openssl req -x509 -newkey rsa:2048 -nodes -keyout ~ts -out ~ts -subj /CN=enats-test-ca -days 1 >/dev/null 2>&1",
+            [CaKeyFile, CaFile]
+        )
+    ),
+    _ = os:cmd(Command),
+    {ok, _} = file:read_file(CaFile),
+    {ok, _} = file:read_file(CaKeyFile),
+    ok.
+
+generate_signed_certificate(CaFile, CaKeyFile, CertFile, KeyFile, ExtFile) ->
+    ok = file:write_file(ExtFile, <<"subjectAltName=DNS:localhost\n">>),
+    CsrCommand = lists:flatten(
+        io_lib:format(
+            "openssl req -newkey rsa:2048 -nodes -keyout ~ts -out ~ts -subj /CN=localhost >/dev/null 2>&1",
+            [KeyFile, CertFile ++ ".csr"]
+        )
+    ),
+    _ = os:cmd(CsrCommand),
+    SignCommand = lists:flatten(
+        io_lib:format(
+            "openssl x509 -req -in ~ts -CA ~ts -CAkey ~ts -CAcreateserial -out ~ts -days 1 -sha256 -extfile ~ts >/dev/null 2>&1",
+            [CertFile ++ ".csr", CaFile, CaKeyFile, CertFile, ExtFile]
+        )
+    ),
+    _ = os:cmd(SignCommand),
+    {ok, _} = file:read_file(CertFile),
+    {ok, _} = file:read_file(KeyFile),
+    ok.
+
+verify_peer_tls_case(Port, CaFile, CertFile) ->
+    {ok, Client} = enats_client:start_link(#{
+        host => "localhost",
+        port => Port,
+        tls => true,
+        ssl_opts => [{verify, verify_peer}, {cacertfile, CaFile}],
+        owner => self()
+    }),
+    ok = enats_client:connect(Client),
+    ok = enats_client:stop(Client),
+    {ok, WrongCaClient} = enats_client:start_link(#{
+        host => "localhost",
+        port => Port,
+        tls => true,
+        ssl_opts => [{verify, verify_peer}, {cacertfile, CertFile}],
+        owner => self()
+    }),
+    ?assertMatch({error, _}, enats_client:connect(WrongCaClient)),
+    ok = enats_client:stop(WrongCaClient),
+    {ok, MismatchClient} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => Port,
+        tls => true,
+        ssl_opts => [{verify, verify_peer}, {cacertfile, CaFile}],
+        owner => self()
+    }),
+    ?assertMatch({error, _}, enats_client:connect(MismatchClient)),
+    ok = enats_client:stop(MismatchClient),
     ok.
 
 t_connection_errors(_Config) ->
@@ -1057,8 +1217,7 @@ t_topology_info(_Config) ->
     ok = enats_client:connect(Client),
     Info = enats_client:info(Client),
     ?assertEqual([<<"nats://127.0.0.1:14222">>, <<"bad">>], maps:get(connect_urls, Info)),
-    ?assertEqual(<<"untrusted">>, maps:get(<<"untrusted">>, Info)),
-    ?assertEqual(false, lists:keymember(untrusted, 1, maps:to_list(Info))),
+    ?assertEqual([{<<"untrusted">>, <<"untrusted">>}], maps:get(extra, Info)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
@@ -1079,7 +1238,7 @@ t_server_failover_handshake(_Config) ->
         owner => self()
     }),
     try
-        ok = enats_client:connect(Client, 200),
+        ok = enats_client:connect(Client, 500),
         ?assertEqual(connected, enats_client:status(Client))
     after
         ok = enats_client:stop(Client),
@@ -1314,11 +1473,14 @@ t_request_infinity(_Config) ->
 t_jetstream_no_responders(_Config) ->
     {Server, Port} = start_fake_server(jetstream_no_responders),
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     ?assertEqual(
         {error, {jetstream, unavailable, <<"503">>}},
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
+    {ok, Snapshot} = enats_client:diagnostics(Client),
+    ?assert(maps:is_key(jetstream_publish_latency, maps:get(latencies, Snapshot))),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 

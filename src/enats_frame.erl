@@ -1,9 +1,8 @@
 -module(enats_frame).
 -moduledoc "Internal NATS protocol frame encoder and incremental parser.".
--define(MAX_CONTROL_LINE, 4096).
--define(MAX_MESSAGE_SIZE, 8 * 1024 * 1024).
 -export([
     initial_state/0,
+    initial_state/1,
     parse/2,
     serialize/1,
     serialize_connect/1,
@@ -31,7 +30,18 @@
     buffer := binary(),
     pending :=
         undefined
-        | {#{atom() => binary()}, non_neg_integer()}
+        | {#{atom() => binary()}, non_neg_integer()},
+    limits := limits()
+}.
+-type limits() :: #{
+    max_control_line := pos_integer(),
+    max_message_size := pos_integer(),
+    max_parser_buffer := pos_integer()
+}.
+-type limit_options() :: #{
+    max_control_line => pos_integer(),
+    max_message_size => pos_integer(),
+    max_parser_buffer => pos_integer()
 }.
 -type wire_frame() ::
     ping
@@ -41,25 +51,61 @@
     | {hpub, binary(), undefined | binary(), [header()], binary()}
     | {sub, binary(), binary(), undefined | binary()}
     | {unsub, binary()}.
--export_type([header/0, frame/0, parse_state/0, wire_frame/0]).
+-type header_error_value() ::
+    atom()
+    | binary()
+    | integer()
+    | boolean()
+    | [header_error_value()]
+    | {header_error_value(), header_error_value()}
+    | {header_error_value(), header_error_value(), header_error_value()}.
+-type header_error() ::
+    {invalid_headers, header_error_value()}
+    | {invalid_header_name, binary()}
+    | {invalid_header_value, binary()}
+    | {invalid_header, header_error_value()}.
+-export_type([header/0, frame/0, parse_state/0, limits/0, wire_frame/0]).
 
 -spec initial_state() -> parse_state().
-initial_state() -> #{buffer => <<>>, pending => undefined}.
+initial_state() -> initial_state(#{}).
+
+-spec initial_state(limit_options()) -> parse_state().
+initial_state(Options) ->
+    #{
+        buffer => <<>>,
+        pending => undefined,
+        limits => maps:merge(
+            #{
+                max_control_line => 4096,
+                max_message_size => 8 * 1024 * 1024,
+                max_parser_buffer => 8 * 1024 * 1024
+            },
+            Options
+        )
+    }.
 
 -spec parse(binary(), parse_state()) -> {[frame()], parse_state()}.
 parse(Data, #{buffer := Buffer, pending := Pending} = State) when is_binary(Data) ->
     parse_loop(<<Buffer/binary, Data/binary>>, State#{buffer => <<>>, pending => Pending}, []).
 
-parse_loop(Bin, _State, _Acc) when byte_size(Bin) > ?MAX_MESSAGE_SIZE ->
+parse_loop(Bin, #{limits := #{max_parser_buffer := MaxBuffer}}, _Acc) when
+    byte_size(Bin) > MaxBuffer
+->
     error(parser_buffer_limit);
+parse_loop(
+    _Bin, #{pending := {_Meta, Need}, limits := #{max_message_size := MaxMessage}}, _Acc
+) when
+    Need > MaxMessage
+->
+    error(payload_too_large);
 parse_loop(Bin, #{pending := {_Meta, Need}} = State, Acc) when byte_size(Bin) < Need + 2 ->
     {lists:reverse(Acc), State#{buffer => Bin}};
 parse_loop(Bin, #{pending := {Meta, Need}} = State, Acc) ->
     <<Body:Need/binary, "\r\n", Rest/binary>> = Bin,
     parse_loop(Rest, State#{pending => undefined}, [complete_payload(Meta, Body) | Acc]);
-parse_loop(Bin, State, Acc) ->
+parse_loop(Bin, #{limits := #{max_control_line := MaxLine}} = State, Acc) ->
     case binary:match(Bin, <<"\r\n">>) of
-        nomatch when byte_size(Bin) > ?MAX_CONTROL_LINE ->
+        nomatch when byte_size(Bin) > MaxLine ->
             error(control_line_too_long);
         nomatch ->
             {lists:reverse(Acc), State#{buffer => Bin}};
@@ -148,7 +194,7 @@ trim_leading_ows(Value) ->
 
 to_int(Bin) ->
     Value = binary_to_integer(Bin),
-    true = Value >= 0 andalso Value =< ?MAX_MESSAGE_SIZE,
+    true = Value >= 0,
     Value.
 
 -spec serialize_connect(#{atom() | binary() => binary() | boolean() | integer() | [binary()]}) ->
@@ -218,7 +264,7 @@ encode_headers(Headers) ->
 headers_size([]) -> 0;
 headers_size(Headers) -> byte_size(encode_headers(Headers)).
 
--spec validate_headers([header()]) -> ok | {error, tuple()}.
+-spec validate_headers([header()]) -> ok | {error, header_error()}.
 validate_headers(Headers) when is_list(Headers) ->
     validate_headers(Headers, ok);
 validate_headers(Headers) ->

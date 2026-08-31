@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+      - "*.*.*"
 
 permissions:
   contents: write
@@ -19,8 +19,12 @@ jobs:
           rebar3-version: "3"
       - name: Check release version
         run: |
-          test "$(git describe --tags --exact-match)" = "$(sed -n 's/.*{vsn, \"\([^\"]*\)\"}.*/\1/p' src/enats_client.app.src)"
-          test "$(git describe --tags --exact-match)" = "$(sed -n 's/^## \(.*\)$/\1/p' CHANGELOG.md | head -1)"
+          tag="$(git describe --tags --exact-match)"
+          [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="$(sed -n 's/.*{vsn, \"\([^\"]*\)\"}.*/\1/p' src/enats_client.app.src)"
+          changelog="$(sed -n 's/^## \(.*\)$/\1/p' CHANGELOG.md | head -1)"
+          test "$tag" = "$version"
+          test "$tag" = "$changelog"
       - run: make static_checks
       - run: make test
       - run: rebar3 hex publish --yes
