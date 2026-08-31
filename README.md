@@ -32,8 +32,14 @@ outside the current scope.
 Secret providers are evaluated on every connection and reconnect. Resolved
 secret values are not retained in client state.
 
-`enats_credentials:from_file/1` parses the standard NATS `.creds` format,
-including the JWT and user NKey seed blocks. TLS is strict when enabled:
+For standard `.creds` authentication, use
+`enats_credentials:from_file/1` and pass the returned authentication map to
+the client. The file is read and parsed on every connection and reconnect;
+only its path is retained in client state. `enats_credentials:from_binary/1`
+validates inline credentials and returns an equivalent provider map.
+
+The credentials parser follows the standard NATS `.creds` format, including
+the JWT and user NKey seed blocks. TLS is strict when enabled:
 the client never silently downgrades to plaintext. By default, the client
 uses the NATS `starttls` handshake, where it receives the server `INFO`
 before upgrading the connection. NATS servers configured with

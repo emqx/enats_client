@@ -17,6 +17,7 @@
     t_reconnect/1, t_stale_connection_reconnect/1, t_disconnect_while_connecting/1,
     t_topology_info/1, t_server_failover/1,
     t_nkey_nats_server/1, t_token_nats_server/1, t_jetstream_nats_server/1, t_nkey_seed/1,
+    t_credentials_file_provider/1,
     t_request_timeout_cleanup/1, t_jetstream_no_responders/1, t_jetstream_json_unavailable/1,
     t_tls_downgrade_rejected/1, t_tls_first/1, t_request_infinity/1]).
 
@@ -33,6 +34,7 @@ all() ->
         t_disconnect_while_connecting, t_topology_info,
         t_server_failover,
         t_nkey_nats_server, t_token_nats_server, t_jetstream_nats_server, t_nkey_seed,
+        t_credentials_file_provider,
         t_request_timeout_cleanup, t_jetstream_no_responders, t_jetstream_json_unavailable,
         t_tls_downgrade_rejected, t_tls_first, t_request_infinity].
 
@@ -315,6 +317,14 @@ t_auth_helpers(_Config) ->
         #{mechanism => token, token => 42}, #{}, #{})),
     ?assertEqual({error, nkey_nonce_missing}, enats_auth:connect_params(
         #{mechanism => nkey, public_key => <<"key">>, sign_fun => (fun(_) -> <<"sig">> end)}, #{}, #{})),
+    Seed = encode_seed(<<1:256>>),
+    {ok, SeedParams} = enats_auth:connect_params(
+        #{mechanism => nkey_seed, seed => (fun() -> Seed end)},
+        #{nonce => <<"nonce">>},
+        #{protocol => 1}
+    ),
+    ?assertEqual(56, byte_size(maps:get(nkey, SeedParams))),
+    ?assert(is_binary(maps:get(sig, SeedParams))),
     {ok, NkeyParams} = enats_auth:connect_params(
         #{mechanism => nkey, public_key => <<"key">>, sign_fun => (fun(<<"nonce">>) -> <<"sig">> end)},
         #{nonce => <<"nonce">>}, #{}),
@@ -685,8 +695,9 @@ t_jetstream_nats_server(Config) ->
     end.
 
 t_nkey_seed(_Config) ->
-    Seed = encode_seed(<<1:256>>),
+    Seed = <<"SUAACAQDAQCQMBYIBEFAWDANBYHRAEISCMKBKFQXDAMRUGY4DUPB6IC5CQ">>,
     {ok, PublicKey, SignFun} = enats_nkey:from_seed(Seed),
+    ?assertEqual(<<"UB43KVROR7TFJ6KAPCYRF2FJROTZAH4FHLTJLPWX4DRZCC5NASLGJBFE">>, PublicKey),
     ?assertEqual(56, byte_size(PublicKey)),
     ?assertEqual(86, byte_size(SignFun(<<"nonce">>))),
     {ok, #{jwt := <<"jwt">>, nkey := <<"PUB">>, sig := <<"SIG">>}} = enats_auth:connect_params(
@@ -701,8 +712,36 @@ t_nkey_seed(_Config) ->
         "\n------END USER NKEY SEED------\n"
     ]),
     {ok, CredsAuth} = enats_credentials:from_binary(Creds),
-    {ok, <<"jwt">>} = enats_secret:resolve(maps:get(jwt, CredsAuth)),
+    {ok, CredsParams} = enats_auth:connect_params(CredsAuth, #{nonce => <<"nonce">>}, #{}),
+    ?assertEqual(<<"jwt">>, maps:get(jwt, CredsParams)),
     ?assertEqual({error, invalid_nkey_seed}, enats_nkey:from_seed(<<"bad">>)).
+
+t_credentials_file_provider(Config) ->
+    Seed = encode_seed(<<1:256>>),
+    Filename = filename:join(?config(priv_dir, Config), "credentials-provider.creds"),
+    Contents1 = credentials_contents(<<"jwt-1">>, Seed),
+    Contents2 = credentials_contents(<<"jwt-2">>, Seed),
+    ok = file:write_file(Filename, Contents1),
+    try
+        {ok, Auth} = enats_credentials:from_file(Filename),
+        Provider = maps:get(provider, Auth),
+        {env, Env} = erlang:fun_info(Provider, env),
+        ?assert(lists:member(Filename, Env)),
+        ?assertNot(lists:member(Contents1, Env)),
+        {ok, Params1} = enats_auth:connect_params(Auth, #{nonce => <<"nonce">>}, #{}),
+        ?assertEqual(<<"jwt-1">>, maps:get(jwt, Params1)),
+        ok = file:write_file(Filename, Contents2),
+        {ok, Params2} = enats_auth:connect_params(Auth, #{nonce => <<"nonce">>}, #{}),
+        ?assertEqual(<<"jwt-2">>, maps:get(jwt, Params2))
+    after
+        ok = file:delete(Filename)
+    end.
+
+credentials_contents(JWT, Seed) ->
+    iolist_to_binary([
+        "-----BEGIN NATS USER JWT-----\n", JWT, "\n------END NATS USER JWT------\n",
+        "-----BEGIN USER NKEY SEED-----\n", Seed, "\n------END USER NKEY SEED------\n"
+    ]).
 
 t_request_timeout_cleanup(_Config) ->
     {Server, Port} = start_fake_server(request_timeout),
@@ -761,7 +800,7 @@ t_jetstream_json_unavailable(_Config) ->
     exit(Server, normal).
 
 encode_seed(PrivateSeed) ->
-    Prefix = <<16#90, 16#A0, PrivateSeed/binary>>,
+    Prefix = <<(16#90 bor (16#A0 bsr 5)), ((16#A0 band 31) bsl 3), PrivateSeed/binary>>,
     encode_base32(<<Prefix/binary, (test_crc16(Prefix)):16/little>>).
 
 test_crc16(Bin) -> test_crc16(Bin, 0).

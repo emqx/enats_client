@@ -1,6 +1,6 @@
 -module(enats_nkey).
 
--export([encode_public/1, sign_fun/2, from_seed/1]).
+-export([encode_public/1, sign_fun/2, from_seed/1, sign_seed/2]).
 
 -define(USER_PREFIX, 16#A0).
 -define(ALPHABET, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567").
@@ -20,16 +20,33 @@ sign_fun(_PublicKey, PrivateKey)
 
 from_seed(Seed0) when is_binary(Seed0) ->
     try
-        <<SeedPrefix:8, UserPrefix:8, Seed:32/binary, Crc:16/little>> = base32_decode(Seed0),
-        true = SeedPrefix =:= 16#90,
-        true = UserPrefix =:= 16#A0,
-        true = Crc =:= crc16(<<SeedPrefix, UserPrefix, Seed/binary>>),
+        {_UserPrefix, Seed} = decode_seed(Seed0),
         {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
         Public = encode_public(PublicKey),
         {ok, Public, sign_fun(Public, Seed)}
     catch
         _:_ -> {error, invalid_nkey_seed}
     end.
+
+sign_seed(Seed0, Nonce) when is_binary(Seed0), is_binary(Nonce) ->
+    try
+        {_UserPrefix, Seed} = decode_seed(Seed0),
+        {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
+        Public = encode_public(PublicKey),
+        Signature = crypto:sign(eddsa, none, Nonce, [Seed, ed25519]),
+        {ok, Public, base64url(Signature)}
+    catch
+        _:_ -> {error, invalid_nkey_seed}
+    end.
+
+decode_seed(Seed0) ->
+    <<Byte1, Byte2, Seed:32/binary, Crc:16/little-unsigned>> = base32_decode(Seed0),
+    SeedPrefix = Byte1 band 16#F8,
+    UserPrefix = ((Byte1 band 16#07) bsl 5) bor ((Byte2 band 16#F8) bsr 3),
+    true = SeedPrefix =:= 16#90,
+    true = UserPrefix =:= 16#A0,
+    true = Crc =:= crc16(<<Byte1, Byte2, Seed/binary>>),
+    {UserPrefix, Seed}.
 
 base32(<<>>, Acc) ->
     lists:reverse(Acc);
