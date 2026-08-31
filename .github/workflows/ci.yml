@@ -4,30 +4,44 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: OTP ${{ matrix.otp }}
     runs-on: ubuntu-latest
-    services:
-      nats:
-        image: nats:2.11
-        ports:
-          - 4222:4222
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["27", "28"]
+        nats: ["2.10.26", "2.11.6"]
     steps:
       - uses: actions/checkout@v4
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "27"
+          otp-version: ${{ matrix.otp }}
           rebar3-version: "3"
       - name: Install nats-server
         run: |
-          version=2.11.6
+          version=${{ matrix.nats }}
+          archive="nats-server-v${version}-linux-amd64.tar.gz"
           curl --fail --silent --show-error --location \
             "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.tar.gz" \
             --output /tmp/nats-server.tar.gz
+          checksum=$(curl --fail --silent --show-error --location \
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/SHA256SUMS" \
+            | awk -v name="${archive}" '$2 == name {print $1}')
+          test -n "$checksum"
+          echo "$checksum  /tmp/nats-server.tar.gz" | sha256sum --check
           tar -xzf /tmp/nats-server.tar.gz -C /tmp
           echo "/tmp/nats-server-v${version}-linux-amd64" >> "$GITHUB_PATH"
       - run: make compile
+      - run: make format-check
+      - run: make specs
       - run: make test
       - run: make coverage
       - run: make dialyzer
       - run: make xref
+      - run: make edoc
+      - run: rebar3 hex build

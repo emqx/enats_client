@@ -1,8 +1,20 @@
-{application, enats_client,
- [{description, "A small OTP NATS Core client"},
-  {vsn, "0.1.10"},
-  {modules, []},
-  {registered, []},
-  {applications, [kernel, stdlib, ssl, crypto]},
-  {mod, {enats_client_app, []}},
-  {env, []}]}.
+{application, enats_client, [
+    {description, "An Erlang/OTP NATS Core client"},
+    {vsn, "0.1.11"},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/emqx/enats_client"}]},
+    {files, [
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        "rebar.config",
+        "rebar.lock",
+        "src",
+        "docs",
+        "examples"
+    ]},
+    {modules, []},
+    {registered, []},
+    {applications, [kernel, stdlib, ssl, crypto, public_key, jiffy]},
+    {env, []}
+]}.

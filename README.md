@@ -1,85 +1,92 @@
 # enats_client
 
-enats_client is an Erlang/OTP client for the Core NATS protocol.
+`enats_client` is a small Erlang/OTP client for the NATS Core protocol.
 
-The public entry point is the enats_client module. It provides connection
-lifecycle management, TCP/TLS transport, Core NATS publish/subscribe,
-headers, flush barriers, reconnect, server-list failover, NKey,
-username/password, token, JWT, and `.creds` authentication.
+The public interface is `enats_client`. It provides TCP, STARTTLS and
+TLS-first transport, Core NATS publish/subscribe, headers, flush barriers,
+request/reply, reconnect and server failover, user/password, token, NKey,
+JWT and standard `.creds` authentication.
 
-JetStream publish is supported through `jetstream_publish/4`. It waits for
-the JetStream PubAck and accepts an optional stable `msg_id` for server-side
+JetStream publish is supported through `jetstream_publish/4`. It waits for a
+JetStream PubAck and accepts an optional stable `msg_id` for server-side
 deduplication. WebSocket transport and client-side persistent buffering are
 outside the current scope.
 
-## Example
+## Basic example
 
-    {ok, Client} = enats_client:start_link(#{
-        host => "127.0.0.1",
-        port => 4222,
-        auth => #{
-            mechanism => user_password,
-            username => <<"alice">>,
-            password => fun() -> get_password() end
-        }
-    }).
+```erlang
+{ok, Client} = enats_client:start_link(#{
+    host => "127.0.0.1",
+    port => 4222,
+    auth => #{
+        mechanism => user_password,
+        username => <<"alice">>,
+        password => fun() -> get_password() end
+    }
+}),
+ok = enats_client:connect(Client),
+ok = enats_client:publish(Client, <<"events.created">>, <<"payload">>),
+ok = enats_client:flush(Client, 1000),
+ok = enats_client:stop(Client).
+```
 
-    ok = enats_client:connect(Client),
-    ok = enats_client:publish(Client, <<"events.created">>, <<"payload">>),
-    ok = enats_client:flush(Client, 1000),
-    ok = enats_client:stop(Client).
+`publish/3,4` reports a successful socket write. It does not imply
+persistence or subscriber delivery. `flush/2` is a PING/PONG barrier and
+confirms that the server processed earlier protocol messages.
+
+## Authentication and TLS
 
 Secret providers are evaluated on every connection and reconnect. Resolved
-secret values are not retained in client state.
+secret values are not retained in client state when a provider function is
+used. Use `enats_auth:credentials_file/1` for standard `.creds` files; the
+file is validated at startup and read again on reconnect while only its path
+is retained in state.
 
-For standard `.creds` authentication, use
-`enats_credentials:from_file/1` and pass the returned authentication map to
-the client. The file is read and parsed on every connection and reconnect;
-only its path is retained in client state. `enats_credentials:from_binary/1`
-is a one-shot validator for inline credentials; callers that need inline
-credentials for reconnects must provide their own lazy provider.
+TLS is secure by default when `tls => true`: peer verification, system CA
+certificates and hostname verification are enabled. `verify_none` is only
+available as an explicit development/test option.
 
-The credentials parser follows the standard NATS `.creds` format, including
-the JWT and user NKey seed blocks. TLS is strict when enabled:
-the client never silently downgrades to plaintext. By default, the client
-uses the NATS `starttls` handshake, where it receives the server `INFO`
-before upgrading the connection. NATS servers configured with
-`tls.handshake_first: true` require the TLS handshake to happen before `INFO`;
-use `tls_handshake => first` for those servers:
+The two supported handshake modes are `starttls` (the default) and `first`.
 
-    {ok, Client} = enats_client:start_link(#{
-        host => "127.0.0.1",
-        port => 4222,
-        tls => true,
-        tls_handshake => first,
-        ssl_opts => [{verify, verify_none}]
-    }),
+## Runtime diagnostics
 
-`tls_handshake => starttls` and `tls_handshake => first` are the two supported
-modes. The mode must match the server configuration; the client does not
-downgrade a TLS-first connection to plaintext.
+Diagnostics are disabled by default and add no message-path timestamp or
+histogram work while disabled. Enable them only during an investigation:
 
-publish/3 reports a successful socket write. It does not imply persistence
-or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that
-the server processed earlier protocol messages. Concurrent flush/2 calls are
-supported; each call waits for the PONG corresponding to its own PING.
+```erlang
+ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 100}),
+{ok, Snapshot} = enats_client:diagnostics(Client),
+ok = enats_client:disable_diagnostics(Client).
+```
 
-`jetstream_publish/4` reports the JetStream PubAck. Use a stable `msg_id`
-when retrying a publish after a connection failure. Core NATS publish may be
-replayed by the caller after an uncertain failure; the client deliberately
-does not claim exactly-once delivery for Core NATS.
+The snapshot contains fixed-memory counters and approximate P50/P90/P95/P99
+latencies for transport connect, NATS connect, total connect, publish,
+request, JetStream publish and message delivery. Latencies use monotonic time
+and are reported in microseconds. Message delivery latency is measured from
+socket receipt to delivery to the owner; it is not business end-to-end latency.
 
-## Tests
+## Ingress and reconnect
 
-The integration suite starts temporary nats-server instances for token and
-NKey authentication. It also supports externally started authenticated and
-TLS servers:
+Socket ingress uses a bounded `{active, N}` mode. Configure the batch size with
+`socket_active_n` (default `100`) to balance throughput and mailbox safety.
+`slow_consumer_limit` protects subscription owners from unbounded mailbox
+growth and removes a subscription that exceeds the limit.
 
-    nats-server -a 127.0.0.1 -p 14222
-    nats-server -a 127.0.0.1 -p 14223 --user alice --pass secret
-    nats-server -a 127.0.0.1 -p 14224 --tls --tlscert server.crt --tlskey server.key
+Reconnect does not buffer or replay Core NATS publishes. Use `drain/2` for a
+graceful shutdown: it unsubscribes, waits for a flush barrier and closes the
+connection.
 
-    ENATS_AUTH_PORT=14223 ENATS_TLS_PORT=14224 make test
+## Tests and development
 
-make coverage runs the same suite with OTP cover and requires total source
-coverage above 80%.
+The test suite uses temporary `nats-server` instances for authentication,
+TLS and JetStream integration paths. Install `nats-server` 2.10 or 2.11 for
+the full suite.
+
+```text
+make test
+make coverage
+make static_checks
+```
+
+The supported CI baseline is Erlang/OTP 27 and 28. The package uses `jiffy`
+2.0.1 for JSON encoding and decoding.

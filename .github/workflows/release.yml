@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          rebar3-version: "3"
+      - name: Check release version
+        run: |
+          test "$(git describe --tags --exact-match)" = "$(sed -n 's/.*{vsn, \"\([^\"]*\)\"}.*/\1/p' src/enats_client.app.src)"
+          test "$(git describe --tags --exact-match)" = "$(sed -n 's/^## \(.*\)$/\1/p' CHANGELOG.md | head -1)"
+      - run: make static_checks
+      - run: make test
+      - run: rebar3 hex publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$(git describe --tags --exact-match)" --generate-notes
