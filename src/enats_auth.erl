@@ -4,7 +4,9 @@
 -type auth() :: none
     | #{mechanism := user_password, username := binary(), password := enats_secret:provider(binary())}
     | #{mechanism := token, token := enats_secret:provider(binary())}
+    | #{mechanism := nkey_seed, seed := enats_secret:provider(binary())}
     | #{mechanism := nkey, public_key := binary(), sign_fun := fun((binary()) -> binary())}
+    | #{mechanism := credentials, provider := enats_secret:provider(binary())}
     | #{mechanism := jwt, jwt := enats_secret:provider(binary()), public_key := binary(),
         sign_fun := fun((binary()) -> binary())}.
 -export_type([auth/0]).
@@ -14,6 +16,22 @@ connect_params(#{mechanism := user_password, username := Username, password := P
     with_secret(Password, fun(Value) -> {ok, Base#{user => Username, pass => Value}} end);
 connect_params(#{mechanism := token, token := Token}, _Info, Base) ->
     with_secret(Token, fun(Value) -> {ok, Base#{auth_token => Value}} end);
+connect_params(#{mechanism := nkey_seed, seed := Seed}, Info, Base) ->
+    case maps:get(nonce, Info, undefined) of
+        undefined ->
+            {error, nkey_nonce_missing};
+        Nonce ->
+            with_secret(Seed, fun(Value) ->
+                case enats_nkey:sign_seed(Value, Nonce) of
+                    {ok, PublicKey, Signature} ->
+                        {ok, Base#{nkey => PublicKey, sig => Signature}};
+                    {error, Reason} ->
+                        {error, Reason}
+                end
+            end)
+    end;
+connect_params(#{mechanism := credentials, provider := Provider}, Info, Base) ->
+    enats_credentials:connect_params(Provider, Info, Base);
 connect_params(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}, Info, Base) ->
     signed_connect_params(nkey, undefined, PublicKey, SignFun, Info, Base);
 connect_params(#{mechanism := jwt, jwt := JWT, public_key := PublicKey, sign_fun := SignFun}, Info, Base) ->

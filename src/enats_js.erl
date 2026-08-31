@@ -12,6 +12,8 @@ publish(Client, Subject, Payload, Options) ->
                 undefined -> decode_pub_ack(Response);
                 Status -> classify_status(Status)
             end;
+        {error, {no_responders, Status}} ->
+            {error, {jetstream_unavailable, Status}};
         {error, _} = Error ->
             Error
     end.

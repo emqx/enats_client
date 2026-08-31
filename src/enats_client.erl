@@ -3,7 +3,12 @@
     publish/3, publish/4, request/4, request/5, jetstream_publish/4,
     subscribe/3, unsubscribe/2, flush/2]).
 start_link(Options) ->
-    enats_connection:start_link(Options#{owner => maps:get(owner, Options, self())}).
+    case is_map(Options) of
+        true ->
+            enats_connection:start_link(Options#{owner => maps:get(owner, Options, self())});
+        false ->
+            {error, {invalid_options, Options}}
+    end.
 connect(Client) -> enats_connection:connect(Client).
 connect(Client, Timeout) -> enats_connection:connect(Client, Timeout).
 disconnect(Client) -> enats_connection:disconnect(Client).

@@ -32,13 +32,37 @@ outside the current scope.
 Secret providers are evaluated on every connection and reconnect. Resolved
 secret values are not retained in client state.
 
-`enats_credentials:from_file/1` parses the standard NATS `.creds` format,
-including the JWT and user NKey seed blocks. TLS is strict when enabled:
-the client never silently downgrades to plaintext.
+For standard `.creds` authentication, use
+`enats_credentials:from_file/1` and pass the returned authentication map to
+the client. The file is read and parsed on every connection and reconnect;
+only its path is retained in client state. `enats_credentials:from_binary/1`
+is a one-shot validator for inline credentials; callers that need inline
+credentials for reconnects must provide their own lazy provider.
+
+The credentials parser follows the standard NATS `.creds` format, including
+the JWT and user NKey seed blocks. TLS is strict when enabled:
+the client never silently downgrades to plaintext. By default, the client
+uses the NATS `starttls` handshake, where it receives the server `INFO`
+before upgrading the connection. NATS servers configured with
+`tls.handshake_first: true` require the TLS handshake to happen before `INFO`;
+use `tls_handshake => first` for those servers:
+
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => 4222,
+        tls => true,
+        tls_handshake => first,
+        ssl_opts => [{verify, verify_none}]
+    }),
+
+`tls_handshake => starttls` and `tls_handshake => first` are the two supported
+modes. The mode must match the server configuration; the client does not
+downgrade a TLS-first connection to plaintext.
 
 publish/3 reports a successful socket write. It does not imply persistence
 or subscriber delivery. flush/2 uses a PING/PONG barrier to confirm that
-the server processed earlier protocol messages.
+the server processed earlier protocol messages. Concurrent flush/2 calls are
+supported; each call waits for the PONG corresponding to its own PING.
 
 `jetstream_publish/4` reports the JetStream PubAck. Use a stable `msg_id`
 when retrying a publish after a connection failure. Core NATS publish may be
