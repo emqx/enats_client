@@ -316,7 +316,7 @@ process_frames([Frame | Rest], StateName, State0) ->
 process_frame({info, RawInfo}, waiting_info, State) ->
     Info = normalize_info(RawInfo),
     Base0 = #{verbose => false, pedantic => false, tls_required => false, protocol => 1,
-        headers => true, lang => <<"erlang">>, version => <<"0.1.5">>},
+        headers => true, lang => <<"erlang">>, version => <<"0.1.6">>},
     Base = case maps:get(headers, Info, false) of
         true -> Base0#{no_responders => true};
         false -> Base0
