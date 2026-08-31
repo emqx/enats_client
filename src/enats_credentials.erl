@@ -1,9 +1,15 @@
 -module(enats_credentials).
 
--export([from_binary/1, from_file/1, validate/1, connect_params/3]).
+-export([from_binary/1, from_file/1, validate_file/1, validate/1, connect_params/3]).
 
 from_file(Filename) ->
     {ok, #{mechanism => credentials, provider => fun() -> file:read_file(Filename) end}}.
+
+validate_file(Filename) ->
+    case file:read_file(Filename) of
+        {ok, Contents} -> validate(Contents);
+        {error, Reason} -> {error, {credentials_file, Reason}}
+    end.
 
 from_binary(Contents) when is_binary(Contents) ->
     case validate(Contents) of

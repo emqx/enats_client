@@ -723,6 +723,7 @@ t_credentials_file_provider(Config) ->
     Contents2 = credentials_contents(<<"jwt-2">>, Seed),
     ok = file:write_file(Filename, Contents1),
     try
+        ?assertEqual(ok, enats_credentials:validate_file(Filename)),
         {ok, Auth} = enats_credentials:from_file(Filename),
         Provider = maps:get(provider, Auth),
         {env, Env} = erlang:fun_info(Provider, env),
