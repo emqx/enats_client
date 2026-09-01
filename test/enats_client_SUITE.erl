@@ -27,6 +27,7 @@
     t_invalid_options/1,
     t_unknown_options/1,
     t_invalid_publish_timeout/1,
+    t_publish_batch/1,
     t_canonical_no_responders/1,
     t_request_without_headers/1,
     t_invalid_headers/1,
@@ -97,6 +98,7 @@ all() ->
         t_invalid_options,
         t_unknown_options,
         t_invalid_publish_timeout,
+        t_publish_batch,
         t_canonical_no_responders,
         t_request_without_headers,
         t_invalid_headers,
@@ -337,6 +339,34 @@ t_invalid_publish_timeout(_Config) ->
         )
     ).
 
+t_publish_batch(Config) ->
+    {ok, Client} = enats_client:start_link(#{
+        port => ?config(port, Config), owner => self(), max_publish_batch_messages => 2
+    }),
+    ok = enats_client:connect(Client),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"batch.test">>, #{}),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:publish_batch(Client, [
+        #{subject => <<"batch.test">>, payload => <<"one">>},
+        #{subject => <<"batch.test">>, payload => <<"two">>}
+    ]),
+    ok = enats_client:flush(Client, 1000),
+    ?assertEqual(<<"one">>, receive_batch_payload(Client, 1000)),
+    ?assertEqual(<<"two">>, receive_batch_payload(Client, 1000)),
+    ?assertEqual(
+        {error, {invalid_option, max_publish_batch_messages, 2}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"batch.test">>, payload => <<"one">>},
+            #{subject => <<"batch.test">>, payload => <<"two">>},
+            #{subject => <<"batch.test">>, payload => <<"three">>}
+        ])
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_client:publish_batch(Client, [#{subject => <<"batch.test">>, payload => bad}])
+    ),
+    ok = enats_client:stop(Client).
+
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, invalid_options}, enats_client:start_link(not_a_map)),
     Dead = spawn(fun() -> ok end),
@@ -566,6 +596,14 @@ slow_owner() ->
     receive
         stop -> ok;
         _Message -> slow_owner()
+    end.
+
+receive_batch_payload(Client, Timeout) ->
+    receive
+        {enats_client, Client, {message, #{payload := Payload}}} -> Payload;
+        _Other -> receive_batch_payload(Client, Timeout)
+    after Timeout ->
+        timeout
     end.
 
 t_canonical_no_responders(_Config) ->

@@ -34,6 +34,9 @@ ok = enats_client:stop(Client).
 persistence or subscriber delivery. `flush/2` is a PING/PONG barrier and
 confirms that the server processed earlier protocol messages.
 
+For higher throughput, `publish_batch/2,3` writes a bounded list of messages in
+one socket operation while preserving the same successful-write guarantee.
+
 Core NATS is at-most-once from the client's perspective. The client does not
 persist offline messages and does not claim exactly-once delivery. Use
 JetStream publish with a stable `msg_id` when server-side deduplication is
@@ -44,8 +47,9 @@ required.
 `enats_client:start_link/1` accepts a map. The main options are `host`,
 `port`, `servers`, `tls`, `tls_handshake`, `ssl_opts`, `auth`,
 `connect_timeout`, `reconnect`, `reconnect_delay`, `socket_active_n`,
-`slow_consumer_limit`, `max_control_line`, `max_message_size` and
-`max_parser_buffer`.
+`slow_consumer_limit`, `max_control_line`, `max_message_size`,
+`max_parser_buffer`, `max_publish_batch_messages` and
+`max_publish_batch_bytes`.
 
 Parser limits default to 4 KiB for a control line and 8 MiB for a message or
 the aggregate parser buffer. They can be lowered or raised explicitly after
@@ -100,9 +104,10 @@ out requests, slow consumers, protocol/transport errors, and messages in/out.
 All counters and histograms are held in bounded in-memory maps and are reset
 with `reset_diagnostics/1`.
 
-For a local throughput A/B check, run `scripts/benchmark.escript 10000 4222`
-with diagnostics disabled and add the third argument `on` to enable the
-default one-in-one-hundred message sampling.
+For a local throughput check, run `scripts/benchmark.escript 10000 4222`
+(`direct` is the default), or select `batch` with
+`scripts/benchmark.escript batch 10000 4222`. Add a final `on` argument to
+enable the default one-in-one-hundred message sampling.
 
 Reconnect does not buffer or replay Core NATS publishes. Use `drain/2` for a
 graceful shutdown: it unsubscribes, waits for a flush barrier and closes the

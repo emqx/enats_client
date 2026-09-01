@@ -13,6 +13,8 @@
     stats/1,
     publish/3,
     publish/4,
+    publish_batch/2,
+    publish_batch/3,
     request/4,
     request/5,
     jetstream_publish/4,
@@ -66,13 +68,21 @@
     slow_consumer_limit => non_neg_integer(),
     max_control_line => pos_integer(),
     max_message_size => pos_integer(),
-    max_parser_buffer => pos_integer()
+    max_parser_buffer => pos_integer(),
+    max_publish_batch_messages => pos_integer(),
+    max_publish_batch_bytes => pos_integer()
 }.
 -type publish_options() :: #{
     headers => headers(),
     reply_to => subject(),
     timeout => call_timeout(),
     msg_id => binary()
+}.
+-type batch_message() :: #{
+    subject := subject(),
+    payload := iodata(),
+    headers => headers(),
+    reply_to => subject()
 }.
 -type connection_request_options() :: #{
     headers => headers(),
@@ -196,6 +206,7 @@
     | {invalid_option, atom()}
     | {invalid_option, atom(), error_value()}
     | {invalid_headers, error_value()}
+    | {invalid_batch_message, pos_integer(), error_reason()}
     | {invalid_header_name, binary()}
     | {invalid_header_value, binary()}
     | {invalid_header, error_value()}
@@ -229,7 +240,8 @@
     stats/0,
     server_info/0,
     reconnect_options/0,
-    error_reason/0
+    error_reason/0,
+    batch_message/0
 ]).
 
 -spec child_spec(options()) -> supervisor:child_spec().
@@ -292,6 +304,23 @@ publish(Client, Subject, Payload0, Options) when is_map(Options) ->
             Error
     end;
 publish(_Client, _Subject, _Payload, _Options) ->
+    {error, invalid_options}.
+
+-spec publish_batch(client(), [batch_message()]) -> ok | {error, error_reason()}.
+publish_batch(Client, Messages) -> publish_batch(Client, Messages, 5000).
+
+-spec publish_batch(client(), [batch_message()], call_timeout()) -> ok | {error, error_reason()}.
+publish_batch(Client, Messages, Timeout) when is_list(Messages) ->
+    case validate_timeout(Timeout) of
+        ok ->
+            case prepare_batch(Messages, 1, []) of
+                {ok, Prepared} -> enats_connection:publish_batch(Client, Prepared, Timeout);
+                Error -> Error
+            end;
+        Error ->
+            Error
+    end;
+publish_batch(_Client, _Messages, _Timeout) ->
     {error, invalid_options}.
 
 -spec request(client(), subject(), iodata(), publish_options()) ->
@@ -422,7 +451,9 @@ validate_start_options(Options) ->
             slow_consumer_limit,
             max_control_line,
             max_message_size,
-            max_parser_buffer
+            max_parser_buffer,
+            max_publish_batch_messages,
+            max_publish_batch_bytes
         ]),
         enats_auth:validate(maps:get(auth, Options, none)),
         validate_host(maps:get(host, Options, "127.0.0.1")),
@@ -448,6 +479,12 @@ validate_start_options(Options) ->
         ),
         validate_positive_integer(
             max_parser_buffer, maps:get(max_parser_buffer, Options, 8 * 1024 * 1024)
+        ),
+        validate_positive_integer(
+            max_publish_batch_messages, maps:get(max_publish_batch_messages, Options, 256)
+        ),
+        validate_positive_integer(
+            max_publish_batch_bytes, maps:get(max_publish_batch_bytes, Options, 1024 * 1024)
         )
     ],
     case lists:dropwhile(fun(Result) -> Result =:= ok end, Checks) of
@@ -458,6 +495,37 @@ validate_start_options(Options) ->
 validate_timeout(infinity) -> ok;
 validate_timeout(Value) when is_integer(Value), Value >= 0 -> ok;
 validate_timeout(_Value) -> {error, invalid_timeout}.
+
+prepare_batch([], _Index, Acc) ->
+    {ok, lists:reverse(Acc)};
+prepare_batch([Message | Rest], Index, Acc) when is_map(Message) ->
+    case validate_allowed_keys(batch_message, Message, [subject, payload, headers, reply_to]) of
+        ok when is_map_key(subject, Message), is_map_key(payload, Message) ->
+            Subject = maps:get(subject, Message),
+            Payload0 = maps:get(payload, Message),
+            Options = maps:with([headers, reply_to], Message),
+            case validate_publish_options(Options, false) of
+                ok ->
+                    case
+                        with_subject(Subject, false, fun() ->
+                            with_payload(Payload0, fun(P) -> {ok, P} end)
+                        end)
+                    of
+                        {ok, Payload} ->
+                            prepare_batch(Rest, Index + 1, [{Subject, Payload, Options} | Acc]);
+                        {error, Reason} ->
+                            {error, {invalid_batch_message, Index, Reason}}
+                    end;
+                {error, Reason} ->
+                    {error, {invalid_batch_message, Index, Reason}}
+            end;
+        ok ->
+            {error, {invalid_batch_message, Index, invalid_options}};
+        {error, Reason} ->
+            {error, {invalid_batch_message, Index, Reason}}
+    end;
+prepare_batch([_Message | _Rest], Index, _Acc) ->
+    {error, {invalid_batch_message, Index, invalid_options}}.
 
 validate_option_timeout(_Name, infinity) -> ok;
 validate_option_timeout(_Name, Value) when is_integer(Value), Value >= 0 -> ok;

@@ -85,6 +85,8 @@ initial_state(Options) ->
     }.
 
 -spec parse(binary(), parse_state()) -> {[frame()], parse_state()}.
+parse(Data, #{buffer := <<>>, pending := Pending} = State) when is_binary(Data) ->
+    parse_loop(Data, State#{pending => Pending}, []);
 parse(Data, #{buffer := Buffer, pending := Pending} = State) when is_binary(Data) ->
     parse_loop(<<Buffer/binary, Data/binary>>, State#{buffer => <<>>, pending => Pending}, []).
 

@@ -11,6 +11,7 @@
     info/1,
     stats/1,
     publish/4,
+    publish_batch/3,
     request/4,
     subscribe/3,
     unsubscribe/2,
@@ -90,6 +91,13 @@ stats(Pid) -> safe_call(Pid, stats, ?TIMEOUT).
 ) -> error_result().
 publish(Pid, Subject, Payload, Options) ->
     safe_call(Pid, {publish, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
+-spec publish_batch(
+    pid(),
+    [{binary(), binary(), enats_client:publish_options()}],
+    non_neg_integer() | infinity
+) -> error_result().
+publish_batch(Pid, Messages, Timeout) ->
+    safe_call(Pid, {publish_batch, Messages}, Timeout).
 -spec request(pid(), binary(), binary(), enats_client:connection_request_options()) ->
     {ok, enats_client:message()} | {error, enats_client:error_reason()}.
 request(Pid, Subject, Payload, Options) ->
@@ -145,6 +153,7 @@ init(Options0) ->
         connect_deadline => undefined,
         flushes => queue:new(),
         subscriptions => #{},
+        subscriptions_by_sid => #{},
         requests => #{},
         request_inbox => undefined,
         request_sid => undefined,
@@ -325,6 +334,21 @@ connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
         {error, Reason} ->
             reply(From, {error, {invalid_subject, Reason}})
     end;
+connected({call, From}, {publish_batch, Messages}, State) ->
+    case publish_batch_frames(Messages, State) of
+        {ok, [], _Count} ->
+            reply(From, ok);
+        {ok, WireFrames, Count} ->
+            case send_frames(WireFrames, State) of
+                ok ->
+                    {keep_state, record_counter_add(messages_out, Count, State),
+                        reply_action(From, ok)};
+                {error, Reason} ->
+                    lost_with_reply(From, Reason, State)
+            end;
+        {error, Reason} ->
+            reply(From, {error, Reason})
+    end;
 connected({call, From}, {request, Subject, Payload0, Options}, State) ->
     case validate_subject(Subject, false) of
         ok ->
@@ -401,8 +425,15 @@ connected({call, From}, {subscribe, Subject, Options}, State) ->
                         monitor => Monitor
                     },
                     Subs = maps:put(Ref, Subscription, maps:get(subscriptions, State)),
+                    SubsBySid = maps:put(
+                        Sid, Ref, maps:get(subscriptions_by_sid, State, #{})
+                    ),
                     {keep_state,
-                        State#{subscriptions => Subs, next_sid => maps:get(next_sid, State) + 1},
+                        State#{
+                            subscriptions => Subs,
+                            subscriptions_by_sid => SubsBySid,
+                            next_sid => maps:get(next_sid, State) + 1
+                        },
                         reply_action(From, {ok, Ref})};
                 {error, Reason} ->
                     lost_with_reply(From, Reason, State)
@@ -412,13 +443,20 @@ connected({call, From}, {subscribe, Subject, Options}, State) ->
     end;
 connected({call, From}, {unsubscribe, Ref}, State) ->
     case maps:take(Ref, maps:get(subscriptions, State)) of
-        {#{sid := Sid}, Subs} ->
-            maybe_demonitor(
-                maps:get(monitor, maps:get(Ref, maps:get(subscriptions, State)), undefined)
-            ),
+        {#{sid := Sid, monitor := Monitor}, Subs} ->
+            maybe_demonitor(Monitor),
             case send_frame({unsub, Sid}, State) of
-                ok -> {keep_state, State#{subscriptions => Subs}, reply_action(From, ok)};
-                {error, Reason} -> lost_with_reply(From, Reason, State)
+                ok ->
+                    {keep_state,
+                        State#{
+                            subscriptions => Subs,
+                            subscriptions_by_sid => maps:remove(
+                                Sid, maps:get(subscriptions_by_sid, State, #{})
+                            )
+                        },
+                        reply_action(From, ok)};
+                {error, Reason} ->
+                    lost_with_reply(From, Reason, State)
             end;
         error ->
             reply(From, {error, not_found})
@@ -692,6 +730,13 @@ reconnecting({call, From}, _Request, _State) ->
 reconnecting(_, _, State) ->
     keep(State).
 
+process_data(Data, StateName, #{diagnostics := #{enabled := false}} = State0) ->
+    try enats_frame:parse(Data, maps:get(parse_state, State0)) of
+        {Frames, ParseState} ->
+            process_frames(Frames, StateName, State0#{parse_state => ParseState})
+    catch
+        _:_ -> lost(StateName, {protocol, invalid_frame}, State0)
+    end;
 process_data(Data, StateName, State0) ->
     State1 = State0#{delivery_started_at => diagnostic_now(State0)},
     try enats_frame:parse(Data, maps:get(parse_state, State0)) of
@@ -986,6 +1031,8 @@ send_frame({connect, Params}, #{socket := Socket}) ->
     send_socket(Socket, enats_frame:serialize_connect(Params));
 send_frame(Frame, #{socket := Socket}) ->
     send_socket(Socket, enats_frame:serialize(Frame)).
+send_frames(WireFrames, #{socket := Socket}) ->
+    send_socket(Socket, WireFrames).
 send_socket({tcp, Socket}, Data) -> gen_tcp:send(Socket, Data);
 send_socket({ssl, Socket}, Data) -> ssl:send(Socket, Data).
 
@@ -1013,6 +1060,57 @@ publish_frame(Subject, Payload, Options) ->
         Headers ->
             {hpub, Subject, maps:get(reply_to, Options, undefined), Headers, Payload}
     end.
+
+publish_batch_frames(Messages, State) ->
+    Options = maps:get(options, State),
+    MaxMessages = maps:get(max_publish_batch_messages, Options),
+    MaxBytes = maps:get(max_publish_batch_bytes, Options),
+    publish_batch_frames(Messages, State, MaxMessages, MaxBytes, 1, 0, 0, []).
+
+publish_batch_frames([], _State, _MaxMessages, _MaxBytes, _Index, Count, _Bytes, Acc) ->
+    {ok, lists:reverse(Acc), Count};
+publish_batch_frames(
+    [_Message | _], _State, MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc
+) when
+    Index > MaxMessages
+->
+    {error, {invalid_option, max_publish_batch_messages, MaxMessages}};
+publish_batch_frames(
+    [{Subject, Payload, PublishOptions} | Rest],
+    State,
+    MaxMessages,
+    MaxBytes,
+    Index,
+    Count,
+    Bytes,
+    Acc
+) ->
+    case validate_publish_options(Payload, PublishOptions, State) of
+        ok ->
+            Frame = publish_frame(Subject, Payload, PublishOptions),
+            WireFrame = enats_frame:serialize(Frame),
+            FrameBytes = iolist_size(WireFrame),
+            NewBytes = Bytes + FrameBytes,
+            case NewBytes =< MaxBytes of
+                true ->
+                    publish_batch_frames(
+                        Rest,
+                        State,
+                        MaxMessages,
+                        MaxBytes,
+                        Index + 1,
+                        Count + 1,
+                        NewBytes,
+                        [WireFrame | Acc]
+                    );
+                false ->
+                    {error, {invalid_option, max_publish_batch_bytes, MaxBytes}}
+            end;
+        {error, Reason} ->
+            {error, {invalid_batch_message, Index, Reason}}
+    end;
+publish_batch_frames([_Message | _], _State, _MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc) ->
+    {error, {invalid_batch_message, Index, invalid_options}}.
 
 request_headers(Options, State) ->
     Headers = maps:get(headers, Options, []),
@@ -1112,26 +1210,49 @@ request_result(#{type := hmsg, payload := <<>>, headers := Headers} = Message) -
 request_result(Message) ->
     {ok, Message}.
 
+deliver_subscription(Message, #{diagnostics := #{enabled := false}} = State) ->
+    Sid = maps:get(sid, Message),
+    case maps:find(Sid, maps:get(subscriptions_by_sid, State, #{})) of
+        {ok, Ref} ->
+            #{owner := Owner, monitor := Monitor} = maps:get(Ref, maps:get(subscriptions, State)),
+            case owner_is_slow(Owner, State) of
+                true ->
+                    _ = send_frame({unsub, Sid}, State),
+                    notify(State, slow_consumer, #{subscription => Ref}),
+                    maybe_demonitor(Monitor),
+                    State#{
+                        subscriptions => maps:remove(Ref, maps:get(subscriptions, State)),
+                        subscriptions_by_sid => maps:remove(
+                            Sid, maps:get(subscriptions_by_sid, State, #{})
+                        )
+                    };
+                false ->
+                    Owner ! {enats_client, self(), {message, Message}},
+                    State
+            end;
+        error ->
+            State
+    end;
 deliver_subscription(Message, State) ->
     Sid = maps:get(sid, Message),
     State1 =
-        case
-            [Sub || Sub <- maps:values(maps:get(subscriptions, State)), maps:get(sid, Sub) =:= Sid]
-        of
-            [#{ref := Ref, owner := Owner} | _] ->
+        case maps:find(Sid, maps:get(subscriptions_by_sid, State, #{})) of
+            {ok, Ref} ->
+                #{owner := Owner, monitor := Monitor} = maps:get(
+                    Ref, maps:get(subscriptions, State)
+                ),
                 case owner_is_slow(Owner, State) of
                     true ->
                         _ = send_frame({unsub, Sid}, State),
                         notify(State, slow_consumer, #{subscription => Ref}),
-                        maybe_demonitor(
-                            maps:get(
-                                monitor, maps:get(Ref, maps:get(subscriptions, State)), undefined
-                            )
-                        ),
+                        maybe_demonitor(Monitor),
                         record_counter(
                             slow_consumers,
                             State#{
-                                subscriptions => maps:remove(Ref, maps:get(subscriptions, State))
+                                subscriptions => maps:remove(Ref, maps:get(subscriptions, State)),
+                                subscriptions_by_sid => maps:remove(
+                                    Sid, maps:get(subscriptions_by_sid, State, #{})
+                                )
                             }
                         );
                     false ->
@@ -1150,7 +1271,7 @@ deliver_subscription(Message, State) ->
                                 SampledState
                         end
                 end;
-            [] ->
+            error ->
                 State
         end,
     record_counter(messages_in, State1).
@@ -1177,7 +1298,13 @@ owner_down(Monitor, State) ->
     of
         [{Ref, Sid}] ->
             maybe_unsubscribe(Sid, State),
-            {keep_state, State#{subscriptions => maps:remove(Ref, maps:get(subscriptions, State))},
+            {keep_state,
+                State#{
+                    subscriptions => maps:remove(Ref, maps:get(subscriptions, State)),
+                    subscriptions_by_sid => maps:remove(
+                        Sid, maps:get(subscriptions_by_sid, State, #{})
+                    )
+                },
                 []};
         [] ->
             keep(State)
@@ -1266,7 +1393,7 @@ clear_subscriptions(State) ->
         end,
         maps:get(subscriptions, State)
     ),
-    State#{subscriptions => #{}}.
+    State#{subscriptions => #{}, subscriptions_by_sid => #{}}.
 
 maybe_demonitor(undefined) ->
     ok;
@@ -1302,6 +1429,7 @@ reset_transport(State) ->
 close(#{socket := undefined}) -> ok;
 close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
+
 validate_options(Options) when is_map(Options) ->
     case maps:get(tls_handshake, Options, starttls) of
         starttls -> validate_ssl_option_container(Options);
@@ -1372,7 +1500,9 @@ normalize_options(Options) ->
             slow_consumer_limit => 10000,
             max_control_line => 4096,
             max_message_size => 8 * 1024 * 1024,
-            max_parser_buffer => 8 * 1024 * 1024
+            max_parser_buffer => 8 * 1024 * 1024,
+            max_publish_batch_messages => 256,
+            max_publish_batch_bytes => 1024 * 1024
         },
         normalize_tls_options(normalize_servers(Options))
     ).
@@ -1624,6 +1754,22 @@ record_counter(Name, State) ->
                 diagnostics => Diagnostics#{
                     counters =>
                         maps:put(Name, maps:get(Name, Counters, 0) + 1, Counters)
+                }
+            }
+    end.
+
+record_counter_add(_Name, 0, State) ->
+    State;
+record_counter_add(Name, Amount, State) when is_integer(Amount), Amount > 0 ->
+    Diagnostics = maps:get(diagnostics, State),
+    case maps:get(enabled, Diagnostics) of
+        false ->
+            State;
+        true ->
+            Counters = maps:get(counters, Diagnostics),
+            State#{
+                diagnostics => Diagnostics#{
+                    counters => maps:put(Name, maps:get(Name, Counters, 0) + Amount, Counters)
                 }
             }
     end.

@@ -1,6 +1,6 @@
 {application, enats_client, [
     {description, "An Erlang/OTP NATS Core client"},
-    {vsn, "0.1.11"},
+    {vsn, "0.1.12"},
     {licenses, ["MIT"]},
     {links, [{"GitHub", "https://github.com/emqx/enats_client"}]},
     {files, [
