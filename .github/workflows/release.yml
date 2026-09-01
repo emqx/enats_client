@@ -1,33 +1,28 @@
-name: CI
+name: Release
 
 on:
   push:
-  pull_request:
+    tags:
+      - "*.*.*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  test:
-    name: OTP ${{ matrix.otp }} / NATS ${{ matrix.nats }}
+  release:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        otp: ["27", "28"]
-        nats: ["2.10.26", "2.11.6"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
-          otp-version: ${{ matrix.otp }}
+          otp-version: "27"
           rebar3-version: "3"
       - name: Install nats-server
         run: |
-          version=${{ matrix.nats }}
+          version=2.11.6
           archive="nats-server-v${version}-linux-amd64.tar.gz"
           curl --fail --silent --show-error --location \
-            "https://github.com/nats-io/nats-server/releases/download/v${version}/nats-server-v${version}-linux-amd64.tar.gz" \
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/${archive}" \
             --output /tmp/nats-server.tar.gz
           checksum=$(curl --fail --silent --show-error --location \
             "https://github.com/nats-io/nats-server/releases/download/v${version}/SHA256SUMS" \
@@ -36,12 +31,20 @@ jobs:
           echo "$checksum  /tmp/nats-server.tar.gz" | sha256sum --check
           tar -xzf /tmp/nats-server.tar.gz -C /tmp
           echo "/tmp/nats-server-v${version}-linux-amd64" >> "$GITHUB_PATH"
-      - run: make compile
-      - run: make format-check
-      - run: make specs
-      - run: make test
-      - run: make coverage
-      - run: make dialyzer
-      - run: make xref
-      - run: make edoc
+      - name: Check release version
+        run: |
+          tag="$(git describe --tags --exact-match)"
+          [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="$(sed -n 's/.*{vsn, \"\([^\"]*\)\"}.*/\1/p' src/enats_client.app.src)"
+          changelog="$(sed -n 's/^## \(.*\)$/\1/p' CHANGELOG.md | head -1)"
+          test "$tag" = "$version"
+          test "$tag" = "$changelog"
+      - run: make release_checks
       - run: rebar3 hex build
+      - run: rebar3 hex publish --yes
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$(git describe --tags --exact-match)" --generate-notes

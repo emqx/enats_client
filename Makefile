@@ -1,4 +1,4 @@
-.PHONY: all compile test coverage dialyzer xref clean
+.PHONY: all compile test coverage dialyzer xref format format-check specs edoc static_checks release_checks clean
 
 all: test
 
@@ -6,17 +6,33 @@ compile:
 	rebar3 compile
 
 test:
-	rebar3 ct --suite test/enats_client_SUITE.erl
+	rebar3 ct
 
 coverage:
-	rebar3 ct --cover --suite test/enats_client_SUITE.erl
-	coverage=$$(rebar3 cover --verbose 2>&1 | awk -F'|' '/total/{gsub("%","",$$3); print $$3+0}'); test "$$coverage" -gt 80
+	rebar3 ct --cover
+	coverage=$$(rebar3 cover --verbose 2>&1 | awk -F'|' '/total/{gsub("%","",$$3); print $$3+0}'); echo "coverage=$$coverage"; test "$$coverage" -ge 85
 
 dialyzer:
 	rebar3 dialyzer
 
 xref:
 	rebar3 xref
+
+format:
+	rebar3 fmt -w
+
+format-check:
+	rebar3 fmt --check
+
+specs:
+	./scripts/check_specs.escript
+
+edoc:
+	rebar3 edoc
+
+static_checks: compile format-check specs dialyzer xref edoc
+
+release_checks: static_checks test coverage
 
 clean:
 	rebar3 clean
