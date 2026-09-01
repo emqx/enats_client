@@ -93,7 +93,7 @@ publish(Pid, Subject, Payload, Options) ->
     safe_call(Pid, {publish, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
 -spec publish_batch(
     pid(),
-    [{binary(), binary(), enats_client:publish_options()}],
+    [enats_client:batch_message()],
     non_neg_integer() | infinity
 ) -> error_result().
 publish_batch(Pid, Messages, Timeout) ->
@@ -335,7 +335,7 @@ connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
             reply(From, {error, {invalid_subject, Reason}})
     end;
 connected({call, From}, {publish_batch, Messages}, State) ->
-    case publish_batch_frames(Messages, State) of
+    case prepare_batch(Messages, State) of
         {ok, [], _Count} ->
             reply(From, ok);
         {ok, WireFrames, Count} ->
@@ -1061,39 +1061,30 @@ publish_frame(Subject, Payload, Options) ->
             {hpub, Subject, maps:get(reply_to, Options, undefined), Headers, Payload}
     end.
 
-publish_batch_frames(Messages, State) ->
+prepare_batch(Messages, State) ->
     Options = maps:get(options, State),
-    MaxMessages = maps:get(max_publish_batch_messages, Options),
-    MaxBytes = maps:get(max_publish_batch_bytes, Options),
-    publish_batch_frames(Messages, State, MaxMessages, MaxBytes, 1, 0, 0, []).
+    MaxMessages = maps:get(max_publish_batch_messages, Options, infinity),
+    MaxBytes = maps:get(max_publish_batch_bytes, Options, infinity),
+    prepare_batch(Messages, State, MaxMessages, MaxBytes, 1, 0, 0, []).
 
-publish_batch_frames([], _State, _MaxMessages, _MaxBytes, _Index, Count, _Bytes, Acc) ->
+prepare_batch([], _State, _MaxMessages, _MaxBytes, _Index, Count, _Bytes, Acc) ->
     {ok, lists:reverse(Acc), Count};
-publish_batch_frames(
-    [_Message | _], _State, MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc
-) when
-    Index > MaxMessages
-->
-    {error, {invalid_option, max_publish_batch_messages, MaxMessages}};
-publish_batch_frames(
-    [{Subject, Payload, PublishOptions} | Rest],
-    State,
-    MaxMessages,
-    MaxBytes,
-    Index,
-    Count,
-    Bytes,
-    Acc
+prepare_batch(
+    _Messages, _State, MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc
+) when is_integer(MaxMessages), Index > MaxMessages ->
+    {error, {batch_too_large, messages, Index, MaxMessages}};
+prepare_batch(
+    [Message | Rest], State, MaxMessages, MaxBytes, Index, Count, Bytes, Acc
 ) ->
-    case validate_publish_options(Payload, PublishOptions, State) of
-        ok ->
+    case prepare_batch_message(Message, State, Index) of
+        {ok, Subject, Payload, PublishOptions} ->
             Frame = publish_frame(Subject, Payload, PublishOptions),
             WireFrame = enats_frame:serialize(Frame),
             FrameBytes = iolist_size(WireFrame),
             NewBytes = Bytes + FrameBytes,
-            case NewBytes =< MaxBytes of
+            case within_batch_limit(NewBytes, MaxBytes) of
                 true ->
-                    publish_batch_frames(
+                    prepare_batch(
                         Rest,
                         State,
                         MaxMessages,
@@ -1104,13 +1095,56 @@ publish_batch_frames(
                         [WireFrame | Acc]
                     );
                 false ->
-                    {error, {invalid_option, max_publish_batch_bytes, MaxBytes}}
+                    {error, {batch_too_large, bytes, NewBytes, MaxBytes}}
             end;
         {error, Reason} ->
             {error, {invalid_batch_message, Index, Reason}}
     end;
-publish_batch_frames([_Message | _], _State, _MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc) ->
+prepare_batch(_Messages, _State, _MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc) ->
     {error, {invalid_batch_message, Index, invalid_options}}.
+
+prepare_batch_message(Message, State, _Index) when is_map(Message) ->
+    case validate_batch_message_keys(Message) of
+        ok when is_map_key(subject, Message), is_map_key(payload, Message) ->
+            Subject = maps:get(subject, Message),
+            Payload0 = maps:get(payload, Message),
+            Options = maps:with([headers, reply_to], Message),
+            case validate_subject(Subject, false) of
+                ok ->
+                    try iolist_to_binary(Payload0) of
+                        Payload ->
+                            case validate_publish_options(Payload, Options, State) of
+                                ok -> {ok, Subject, Payload, Options};
+                                {error, Reason} -> {error, Reason}
+                            end
+                    catch
+                        error:badarg -> {error, invalid_payload}
+                    end;
+                {error, Reason} ->
+                    {error, {invalid_subject, Reason}}
+            end;
+        ok ->
+            {error, invalid_options};
+        {error, Reason} ->
+            {error, Reason}
+    end;
+prepare_batch_message(_Message, _State, _Index) ->
+    {error, invalid_options}.
+
+validate_batch_message_keys(Message) ->
+    UnknownKeys = lists:sort([
+        Key
+     || Key <- maps:keys(Message), not lists:member(Key, [subject, payload, headers, reply_to])
+    ]),
+    case UnknownKeys of
+        [] -> ok;
+        _ -> {error, {invalid_option, batch_message, {unknown_keys, UnknownKeys}}}
+    end.
+
+within_batch_limit(_Value, infinity) ->
+    true;
+within_batch_limit(Value, Limit) ->
+    Value =< Limit.
 
 request_headers(Options, State) ->
     Headers = maps:get(headers, Options, []),
@@ -1500,9 +1534,7 @@ normalize_options(Options) ->
             slow_consumer_limit => 10000,
             max_control_line => 4096,
             max_message_size => 8 * 1024 * 1024,
-            max_parser_buffer => 8 * 1024 * 1024,
-            max_publish_batch_messages => 256,
-            max_publish_batch_bytes => 1024 * 1024
+            max_parser_buffer => 8 * 1024 * 1024
         },
         normalize_tls_options(normalize_servers(Options))
     ).

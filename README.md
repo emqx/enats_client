@@ -34,8 +34,12 @@ ok = enats_client:stop(Client).
 persistence or subscriber delivery. `flush/2` is a PING/PONG barrier and
 confirms that the server processed earlier protocol messages.
 
-For higher throughput, `publish_batch/2,3` writes a bounded list of messages in
-one socket operation while preserving the same successful-write guarantee.
+For higher throughput, `publish_batch/2,3` writes a list of messages in one
+socket operation while preserving the same successful-write guarantee.
+Batch message-count and wire-byte limits are unlimited by default. Set
+`max_publish_batch_messages` and/or `max_publish_batch_bytes` explicitly when
+the caller wants admission protection; large batches still consume memory and
+occupy the connection process until the socket write completes.
 
 Core NATS is at-most-once from the client's perspective. The client does not
 persist offline messages and does not claim exactly-once delivery. Use
@@ -85,8 +89,9 @@ during drain never starts reconnect.
 ## Performance reference
 
 The following local comparison uses `nats-server 2.11.6`, Erlang/OTP 27,
-`nats.go v1.53.1`, 5,000 messages per run, and the median of three runs on
-the same host. Core NATS and JetStream use separate server instances.
+`nats.go v1.53.1`, 5,000 messages for Core NATS, 2,000 messages for JetStream,
+and the median of three runs on the same host. Core NATS and JetStream use
+separate server instances. Batch measurements use a 256-message batch size.
 
 For Core NATS, `pub` is direct publish followed by one final flush. The Go
 client buffers `Publish` calls internally, so this is not an apples-to-apples
@@ -97,28 +102,34 @@ closer comparison.
 
 | Scenario | enats | nats.go | enats / Go |
 | --- | ---: | ---: | ---: |
-| Direct publish + final flush | 48.4k msg/s | 3.26M msg/s | 1/67 |
-| Publish + flush per message | 9.37k msg/s | 13.40k msg/s | 70% |
-| Request/reply | 5.23k msg/s | 6.20k msg/s | 84% |
-| Burst pub/sub | 25.9k msg/s | 174.4k msg/s | 15% |
-| Synchronous pub/sub | 8.19k msg/s | 11.98k msg/s | 68% |
-| `publish_batch` | 384k msg/s | — | 8x direct enats |
+| Direct publish + final flush | 49.2k msg/s | 3.25M msg/s | 1/66 |
+| Publish + flush per message | 9.62k msg/s | 13.52k msg/s | 71% |
+| Request/reply | 5.34k msg/s | 6.35k msg/s | 84% |
+| Burst pub/sub | 26.9k msg/s | 174.1k msg/s | 15% |
+| Synchronous pub/sub | 8.31k msg/s | 12.0k msg/s | 69% |
+| `publish_batch` | 247k msg/s | — | 5.2x direct enats |
 
-Request latency was p50/p99 `187/241 us` for enats and `156/194 us` for
-nats.go. Synchronous pub/sub latency was `118/154 us` and `79/102 us`,
-respectively. Burst pub/sub latency includes queueing while the publisher is
-still producing messages and is not a pure network latency measurement.
+Request latency was p50/p99 `187/236 us` for enats and `154/189 us` for
+nats.go. Synchronous pub/sub latency was `115/154 us` and `79/101 us`,
+respectively. Burst pub/sub latency was `94.6/177.2 ms` and `14.3/16.4 ms`,
+respectively; it includes queueing while the publisher is still producing
+messages and is not a pure network latency measurement.
 
 ### Core NATS, 4KiB payload
 
 | Scenario | enats | nats.go | enats / Go |
 | --- | ---: | ---: | ---: |
-| Direct publish + final flush | 40.4k msg/s | 368k msg/s | 1/9.1 |
-| Publish + flush per message | 9.77k msg/s | 13.14k msg/s | 74% |
-| Request/reply | 4.05k msg/s | 5.94k msg/s | 68% |
-| Burst pub/sub | 10.9k msg/s | 118.8k msg/s | 9% |
-| Synchronous pub/sub | 6.39k msg/s | 11.40k msg/s | 56% |
-| `publish_batch` | 190k msg/s | — | 4.7x direct enats |
+| Direct publish + final flush | 41.2k msg/s | 344k msg/s | 1/8.4 |
+| Publish + flush per message | 9.74k msg/s | 13.09k msg/s | 74% |
+| Request/reply | 4.04k msg/s | 5.93k msg/s | 68% |
+| Burst pub/sub | 11.0k msg/s | 118.5k msg/s | 9% |
+| Synchronous pub/sub | 6.42k msg/s | 11.4k msg/s | 56% |
+| `publish_batch` | 244k msg/s | — | 5.9x direct enats |
+
+Request latency was p50/p99 `241/311 us` for enats and `163/206 us` for
+nats.go. Synchronous pub/sub latency was `149/198 us` and `83/106 us`,
+respectively. Burst pub/sub latency was `318/442 ms` and `20.3/29.5 ms`,
+respectively, including producer queueing.
 
 ### JetStream PubAck
 
@@ -127,13 +138,13 @@ the synchronous PubAck request path over 2,000 messages.
 
 | Payload / scenario | enats | nats.go | enats / Go |
 | --- | ---: | ---: | ---: |
-| 128B, no message ID | 7.86k msg/s | 8.99k msg/s | 87.5% |
-| 128B, unique `msg_id` | 7.46k msg/s | 8.59k msg/s | 86.9% |
-| 4KiB, no message ID | 7.20k msg/s | 8.13k msg/s | 88.6% |
-| 4KiB, unique `msg_id` | 7.33k msg/s | 7.90k msg/s | 92.8% |
+| 128B, no message ID | 8.02k msg/s | 8.70k msg/s | 92.2% |
+| 128B, unique `msg_id` | 7.47k msg/s | 8.38k msg/s | 89.1% |
+| 4KiB, no message ID | 7.11k msg/s | 7.91k msg/s | 89.9% |
+| 4KiB, unique `msg_id` | 7.02k msg/s | 7.72k msg/s | 91.0% |
 
-JetStream p50/p99 latency ranged from `124/164 us` to `138/182 us` for enats,
-and from `110/141 us` to `125/164 us` for nats.go. Existing integration tests
+JetStream p50/p99 latency ranged from `121/160 us` to `136/181 us` for enats,
+and from `111/139 us` to `116/161 us` for nats.go. Existing integration tests
 also verify duplicate `msg_id` handling: the duplicate publish returns the
 same sequence with `duplicate => true`.
 
@@ -163,10 +174,18 @@ out requests, slow consumers, protocol/transport errors, and messages in/out.
 All counters and histograms are held in bounded in-memory maps and are reset
 with `reset_diagnostics/1`.
 
-For a local throughput check, run `scripts/benchmark.escript 10000 4222`
-(`direct` is the default), or select `batch` with
-`scripts/benchmark.escript batch 10000 4222`. Add a final `on` argument to
-enable the default one-in-one-hundred message sampling.
+For a local throughput check, run
+`scripts/benchmark.escript direct 4222 10000 128` or select another supported
+mode and payload size. For a full Core NATS and JetStream comparison against
+the pinned official Go client, run
+`scripts/benchmark_compare.sh --runs 3 --payload-sizes 128,4096`. Set
+`ENATS_BENCHMARK_OUTPUT` to retain raw results at a chosen path. The legacy
+`scripts/benchmark.escript 10000 4222` invocation remains supported. Add a
+final `on` argument to enable the default one-in-one-hundred message sampling.
+
+The benchmark modes are `direct`, `pubsync`, `request`, `pubsub`,
+`pubsubsync`, `batch`, `jetstream` and `jetstream_msgid`. The Go harness covers
+the matching Core NATS and JetStream modes; `batch` is enats-specific.
 
 Reconnect does not buffer or replay Core NATS publishes. Use `drain/2` for a
 graceful shutdown: it unsubscribes, waits for a flush barrier and closes the
@@ -196,9 +215,9 @@ make static_checks
 ```
 
 `make specs` runs `scripts/check_specs.escript`, which verifies that every
-exported source function has an Erlang `-spec`. The benchmark script is a
-developer-only throughput and diagnostics smoke test; neither script is part
-of the Hex package.
+exported source function has an Erlang `-spec`. The benchmark scripts and the
+pinned official Go harness are developer-only tooling and are not part of the
+Hex package.
 
 The supported CI baseline is Erlang/OTP 27 and 28. The package uses `jiffy`
 2.0.1 for JSON encoding and decoding.

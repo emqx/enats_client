@@ -365,11 +365,19 @@ t_publish_batch(Config) ->
     ?assertEqual({error, invalid_timeout}, enats_client:publish_batch(Client, [], bad_timeout)),
     ?assertEqual({error, invalid_options}, enats_client:publish_batch(Client, bad, 1000)),
     ?assertEqual(
-        {error, {invalid_option, max_publish_batch_messages, 2}},
+        {error, {batch_too_large, messages, 3, 2}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>},
             #{subject => <<"batch.test">>, payload => <<"two">>},
             #{subject => <<"batch.test">>, payload => <<"three">>}
+        ])
+    ),
+    ?assertMatch(
+        {error, {batch_too_large, messages, 3, 2}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"batch.test">>, payload => <<"one">>},
+            #{subject => <<"batch.test">>, payload => <<"two">>},
+            #{subject => <<"batch.test">>, payload => bad}
         ])
     ),
     ?assertMatch(
@@ -386,28 +394,73 @@ t_publish_batch(Config) ->
         port => ?config(port, Config), max_publish_batch_bytes => 1
     }),
     ok = enats_client:connect(LimitedClient),
-    ?assertEqual(
-        {error, {invalid_option, max_publish_batch_bytes, 1}},
+    ?assertMatch(
+        {error, {batch_too_large, bytes, _, 1}},
         enats_client:publish_batch(LimitedClient, [
             #{subject => <<"batch.test">>, payload => <<"one">>}
         ])
     ),
     ?assertMatch(
         {error, {invalid_batch_message, 1, _}},
-        enats_connection:publish_batch(Client, [bad], 1000)
+        enats_client:publish_batch(Client, [bad], 1000)
     ),
     ?assertMatch(
         {error, {invalid_batch_message, 1, _}},
-        enats_connection:publish_batch(
+        enats_client:publish_batch(
             Client,
             [
-                {<<"batch.test">>, <<"one">>, #{headers => bad}}
+                #{subject => <<"batch.test">>, payload => <<"one">>, headers => bad}
             ],
             1000
         )
     ),
+    ok = enats_client:publish_batch(Client, [
+        #{
+            subject => <<"batch.test">>,
+            payload => <<"headers">>,
+            headers => [{<<"X-Test">>, <<"yes">>}],
+            reply_to => <<"batch.reply">>
+        }
+    ]),
+    ok = enats_client:flush(Client, 1000),
+    receive
+        {enats_client, Client,
+            {message, #{
+                payload := <<"headers">>,
+                headers := [{<<"X-Test">>, <<"yes">>}],
+                reply_to := <<"batch.reply">>
+            }}} ->
+            ok
+    after 1000 ->
+        ct:fail(batch_headers_not_received)
+    end,
     ok = enats_client:stop(LimitedClient),
-    ok = enats_client:stop(Client).
+    ok = enats_client:stop(Client),
+    {ok, DefaultClient} = enats_client:start_link(#{
+        port => ?config(port, Config), owner => self()
+    }),
+    ok = enats_client:connect(DefaultClient),
+    Many = [#{subject => <<"batch.unlimited">>, payload => <<"x">>} || _ <- lists:seq(1, 257)],
+    ok = enats_client:publish_batch(DefaultClient, Many),
+    ok = enats_client:flush(DefaultClient, 1000),
+    LargePayload = binary:copy(<<"x">>, 600 * 1024),
+    ok = enats_client:publish_batch(DefaultClient, [
+        #{subject => <<"batch.unlimited">>, payload => LargePayload},
+        #{subject => <<"batch.unlimited">>, payload => LargePayload}
+    ]),
+    ok = enats_client:flush(DefaultClient, 1000),
+    ok = enats_client:stop(DefaultClient),
+    {ok, InfinityClient} = enats_client:start_link(#{
+        port => ?config(port, Config),
+        max_publish_batch_messages => infinity,
+        max_publish_batch_bytes => infinity
+    }),
+    ok = enats_client:connect(InfinityClient),
+    ok = enats_client:publish_batch(InfinityClient, [
+        #{subject => <<"batch.infinity">>, payload => <<"ok">>}
+    ]),
+    ok = enats_client:flush(InfinityClient, 1000),
+    ok = enats_client:stop(InfinityClient).
 
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, invalid_options}, enats_client:start_link(not_a_map)),
