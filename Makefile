@@ -1,4 +1,4 @@
-.PHONY: all compile test coverage dialyzer xref format format-check specs edoc static_checks clean
+.PHONY: all compile test coverage dialyzer xref format format-check specs edoc static_checks release_checks clean
 
 all: test
 
@@ -31,6 +31,8 @@ edoc:
 	rebar3 edoc
 
 static_checks: compile format-check specs dialyzer xref edoc
+
+release_checks: static_checks test coverage
 
 clean:
 	rebar3 clean

@@ -39,8 +39,8 @@ jobs:
           changelog="$(sed -n 's/^## \(.*\)$/\1/p' CHANGELOG.md | head -1)"
           test "$tag" = "$version"
           test "$tag" = "$changelog"
-      - run: make static_checks
-      - run: make test
+      - run: make release_checks
+      - run: rebar3 hex build
       - run: rebar3 hex publish --yes
         env:
           HEX_API_KEY: ${{ secrets.HEX_API_KEY }}

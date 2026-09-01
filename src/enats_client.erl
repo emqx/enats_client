@@ -384,7 +384,10 @@ drain(Client, Timeout) ->
 
 -spec enable_diagnostics(client(), diagnostics_options()) -> ok | {error, error_reason()}.
 enable_diagnostics(Client, Options) when is_map(Options) ->
-    enats_connection:enable_diagnostics(Client, Options);
+    case validate_allowed_keys(diagnostics, Options, [message_sample_every]) of
+        ok -> enats_connection:enable_diagnostics(Client, Options);
+        Error -> Error
+    end;
 enable_diagnostics(_Client, _Options) ->
     {error, invalid_options}.
 
@@ -399,6 +402,28 @@ reset_diagnostics(Client) -> enats_connection:reset_diagnostics(Client).
 
 validate_start_options(Options) ->
     Checks = [
+        validate_allowed_keys(options, Options, [
+            id,
+            host,
+            port,
+            servers,
+            tls,
+            tls_handshake,
+            ssl_opts,
+            auth,
+            connect_timeout,
+            reconnect,
+            reconnect_delay,
+            owner,
+            notify,
+            ping_interval,
+            max_pings_out,
+            socket_active_n,
+            slow_consumer_limit,
+            max_control_line,
+            max_message_size,
+            max_parser_buffer
+        ]),
         enats_auth:validate(maps:get(auth, Options, none)),
         validate_host(maps:get(host, Options, "127.0.0.1")),
         validate_port(maps:get(port, Options, 4222)),
@@ -505,6 +530,13 @@ validate_servers(Servers) when is_list(Servers), Servers =/= [] ->
 validate_servers(Value) ->
     {error, {invalid_option, servers, Value}}.
 
+validate_allowed_keys(Scope, Options, AllowedKeys) when is_map(Options) ->
+    UnknownKeys = lists:sort([Key || Key <- maps:keys(Options), not lists:member(Key, AllowedKeys)]),
+    case UnknownKeys of
+        [] -> ok;
+        _ -> {error, {invalid_option, Scope, {unknown_keys, UnknownKeys}}}
+    end.
+
 validate_boolean(_Name, Value) when is_boolean(Value) -> ok;
 validate_boolean(Name, Value) -> {error, {invalid_option, Name, Value}}.
 
@@ -527,40 +559,54 @@ validate_reconnect(true) ->
     ok;
 validate_reconnect(Options) when is_map(Options) ->
     case
-        {
-            validate_option_timeout(min_delay, maps:get(min_delay, Options, 100)),
-            validate_option_timeout(max_delay, maps:get(max_delay, Options, 5000)),
-            validate_attempts(maps:get(max_attempts, Options, infinity)),
-            validate_multiplier(maps:get(multiplier, Options, 2.0)),
-            validate_jitter(maps:get(jitter, Options, 0.2)),
-            validate_delay_range(Options)
-        }
+        validate_allowed_keys(reconnect, Options, [
+            min_delay, max_delay, multiplier, jitter, max_attempts
+        ])
     of
-        {ok, ok, ok, ok, ok, ok} -> ok;
-        {Error, _, _, _, _, _} when Error =/= ok -> Error;
-        {_, Error, _, _, _, _} when Error =/= ok -> Error;
-        {_, _, Error, _, _, _} when Error =/= ok -> Error;
-        {_, _, _, Error, _, _} when Error =/= ok -> Error;
-        {_, _, _, _, Error, _} when Error =/= ok -> Error;
-        {_, _, _, _, _, Error} -> Error
+        ok ->
+            case
+                {
+                    validate_option_timeout(min_delay, maps:get(min_delay, Options, 100)),
+                    validate_option_timeout(max_delay, maps:get(max_delay, Options, 5000)),
+                    validate_attempts(maps:get(max_attempts, Options, infinity)),
+                    validate_multiplier(maps:get(multiplier, Options, 2.0)),
+                    validate_jitter(maps:get(jitter, Options, 0.2)),
+                    validate_delay_range(Options)
+                }
+            of
+                {ok, ok, ok, ok, ok, ok} -> ok;
+                {Error, _, _, _, _, _} when Error =/= ok -> Error;
+                {_, Error, _, _, _, _} when Error =/= ok -> Error;
+                {_, _, Error, _, _, _} when Error =/= ok -> Error;
+                {_, _, _, Error, _, _} when Error =/= ok -> Error;
+                {_, _, _, _, Error, _} when Error =/= ok -> Error;
+                {_, _, _, _, _, Error} -> Error
+            end;
+        Error ->
+            Error
     end;
 validate_reconnect(Value) ->
     {error, {invalid_option, reconnect, Value}}.
 
 validate_subscribe_options(Options) ->
-    case {maps:get(owner, Options, self()), maps:get(queue_group, Options, undefined)} of
-        {Owner, QueueGroup} when is_pid(Owner) ->
-            case QueueGroup of
-                undefined ->
-                    ok;
+    case validate_allowed_keys(subscribe, Options, [queue_group, owner]) of
+        ok ->
+            case {maps:get(owner, Options, self()), maps:get(queue_group, Options, undefined)} of
+                {Owner, QueueGroup} when is_pid(Owner) ->
+                    case QueueGroup of
+                        undefined ->
+                            ok;
+                        _ ->
+                            case valid_protocol_token(QueueGroup) of
+                                true -> ok;
+                                false -> {error, {invalid_option, queue_group}}
+                            end
+                    end;
                 _ ->
-                    case valid_protocol_token(QueueGroup) of
-                        true -> ok;
-                        false -> {error, {invalid_option, queue_group}}
-                    end
+                    {error, invalid_options}
             end;
-        _ ->
-            {error, invalid_options}
+        Error ->
+            Error
     end.
 
 validate_publish_options(Options, AllowMsgId) ->

@@ -25,6 +25,7 @@
     t_invalid_subject/1,
     t_lazy_secret/1,
     t_invalid_options/1,
+    t_unknown_options/1,
     t_invalid_publish_timeout/1,
     t_canonical_no_responders/1,
     t_request_without_headers/1,
@@ -94,6 +95,7 @@ all() ->
         t_invalid_subject,
         t_lazy_secret,
         t_invalid_options,
+        t_unknown_options,
         t_invalid_publish_timeout,
         t_canonical_no_responders,
         t_request_without_headers,
@@ -304,6 +306,28 @@ t_invalid_options(_Config) ->
         {error, {invalid_option, max_parser_buffer, 0}},
         enats_client:start_link(#{max_parser_buffer => 0})
     ).
+
+t_unknown_options(Config) ->
+    ?assertEqual(
+        {error, {invalid_option, options, {unknown_keys, [tls_typo]}}},
+        enats_client:start_link(#{tls_typo => true})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, reconnect, {unknown_keys, [unknown]}}},
+        enats_client:start_link(#{reconnect => #{unknown => true}})
+    ),
+    {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, {invalid_option, subscribe, {unknown_keys, [unknown]}}},
+        enats_client:subscribe(Client, <<"unknown.options">>, #{unknown => true})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, diagnostics, {unknown_keys, [unknown]}}},
+        enats_client:enable_diagnostics(Client, #{unknown => true})
+    ),
+    ?assertEqual(true, is_process_alive(Client)),
+    ok = enats_client:stop(Client).
 
 t_invalid_publish_timeout(_Config) ->
     ?assertEqual(
