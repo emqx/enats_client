@@ -353,6 +353,7 @@ t_publish_batch(Config) ->
     ok = enats_client:flush(Client, 1000),
     ?assertEqual(<<"one">>, receive_batch_payload(Client, 1000)),
     ?assertEqual(<<"two">>, receive_batch_payload(Client, 1000)),
+    ok = enats_client:publish_batch(Client, []),
     ?assertEqual(
         {error, {invalid_option, max_publish_batch_messages, 2}},
         enats_client:publish_batch(Client, [
@@ -365,6 +366,31 @@ t_publish_batch(Config) ->
         {error, {invalid_batch_message, 1, _}},
         enats_client:publish_batch(Client, [#{subject => <<"batch.test">>, payload => bad}])
     ),
+    {ok, LimitedClient} = enats_client:start_link(#{
+        port => ?config(port, Config), max_publish_batch_bytes => 1
+    }),
+    ok = enats_client:connect(LimitedClient),
+    ?assertEqual(
+        {error, {invalid_option, max_publish_batch_bytes, 1}},
+        enats_client:publish_batch(LimitedClient, [
+            #{subject => <<"batch.test">>, payload => <<"one">>}
+        ])
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_connection:publish_batch(Client, [bad], 1000)
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_connection:publish_batch(
+            Client,
+            [
+                {<<"batch.test">>, <<"one">>, #{headers => bad}}
+            ],
+            1000
+        )
+    ),
+    ok = enats_client:stop(LimitedClient),
     ok = enats_client:stop(Client).
 
 t_invalid_public_inputs(Config) ->
@@ -475,6 +501,13 @@ t_diagnostics(Config) ->
     ok = enats_client:reset_diagnostics(Client),
     {ok, Reset} = enats_client:diagnostics(Client),
     ?assertEqual(#{}, maps:get(latencies, Reset)),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"diagnostics.delivery">>, #{}),
+    ok = enats_client:publish(Client, <<"diagnostics.delivery">>, <<"payload">>),
+    ok = enats_client:flush(Client, 1000),
+    ?assertEqual(<<"payload">>, receive_batch_payload(Client, 1000)),
+    {ok, DeliverySnapshot} = enats_client:diagnostics(Client),
+    ?assert(maps:is_key(delivery_latency, maps:get(latencies, DeliverySnapshot))),
     ok = enats_client:disable_diagnostics(Client),
     ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
     ok = enats_client:stop(Client).
