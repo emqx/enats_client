@@ -36,8 +36,10 @@
     t_connection_queries/1,
     t_fake_connection_paths/1,
     t_protocol_error_disconnect/1,
+    t_info_update/1,
     t_reconnect/1,
     t_reconnect_cancel/1,
+    t_reconnect_exhausted/1,
     t_stale_connection_reconnect/1,
     t_disconnect_while_connecting/1,
     t_topology_info/1,
@@ -50,6 +52,7 @@
     t_credentials_file_provider/1,
     t_request_timeout_cleanup/1,
     t_jetstream_no_responders/1,
+    t_jetstream_status_rejected/1,
     t_jetstream_json_unavailable/1,
     t_tls_downgrade_rejected/1,
     t_tls_first/1,
@@ -101,8 +104,10 @@ all() ->
         t_connection_queries,
         t_fake_connection_paths,
         t_protocol_error_disconnect,
+        t_info_update,
         t_reconnect,
         t_reconnect_cancel,
+        t_reconnect_exhausted,
         t_stale_connection_reconnect,
         t_disconnect_while_connecting,
         t_topology_info,
@@ -115,6 +120,7 @@ all() ->
         t_credentials_file_provider,
         t_request_timeout_cleanup,
         t_jetstream_no_responders,
+        t_jetstream_status_rejected,
         t_jetstream_json_unavailable,
         t_tls_downgrade_rejected,
         t_tls_first,
@@ -311,6 +317,9 @@ t_invalid_public_inputs(Config) ->
     ChildSpec = enats_client:child_spec(#{id => diagnostics_test}),
     ?assertEqual(diagnostics_test, maps:get(id, ChildSpec)),
     ?assertEqual(disconnected, enats_client:status(Client)),
+    Client ! unexpected_disconnected_event,
+    Client ! {'DOWN', make_ref(), process, self(), normal},
+    timer:sleep(1),
     ?assertEqual(#{}, enats_client:info(Client)),
     ?assertEqual(disconnected, maps:get(status, enats_client:stats(Client))),
     ?assertEqual({error, diagnostics_disabled}, enats_client:reset_diagnostics(Client)),
@@ -320,6 +329,10 @@ t_invalid_public_inputs(Config) ->
     ok = enats_client:connect(Client),
     ?assertEqual(connected, enats_client:status(Client)),
     ?assertEqual(connected, maps:get(status, enats_client:stats(Client))),
+    Client ! unexpected_connected_event,
+    ?assertEqual({error, already_connected}, enats_client:connect(Client, 10)),
+    Client ! {'DOWN', make_ref(), process, self(), normal},
+    timer:sleep(1),
     ?assertEqual(
         {error, invalid_payload}, enats_client:publish(Client, <<"input.test">>, not_iodata)
     ),
@@ -334,6 +347,14 @@ t_invalid_public_inputs(Config) ->
     ),
     ?assertEqual(
         {error, invalid_options}, enats_client:subscribe(Client, <<"input.test">>, not_a_map)
+    ),
+    ?assertEqual(
+        {error, invalid_options},
+        enats_client:publish(Client, <<"input.test">>, <<"p">>, bad_options)
+    ),
+    ?assertEqual(
+        {error, invalid_options},
+        enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
         {error, invalid_options}, enats_client:subscribe(Client, <<"input.test">>, #{owner => bad})
@@ -570,6 +591,10 @@ t_drain_pending_request(_Config) ->
     receive
         {fake_drain_started, Server} ->
             ?assertEqual(draining, maps:get(status, enats_client:stats(Client))),
+            ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
+            Client ! unexpected_draining_event,
+            Client ! {'DOWN', make_ref(), process, self(), normal},
+            timer:sleep(1),
             Server ! release_drain_request
     after 1000 -> ct:fail(drain_not_started)
     end,
@@ -648,7 +673,7 @@ t_invalid_headers(_Config) ->
 
 t_connect_publish_subscribe_flush(Config) ->
     {ok, Client} = enats_client:start_link(#{
-        host => "127.0.0.1", port => ?config(port, Config), owner => self()
+        host => "127.0.0.1", port => ?config(port, Config), owner => self(), socket_active_n => 1
     }),
     ok = enats_client:connect(Client),
     ?assertEqual(connected, enats_client:status(Client)),
@@ -1375,6 +1400,19 @@ t_protocol_error_disconnect(_Config) ->
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
+t_info_update(_Config) ->
+    {Server, Port} = start_fake_server(info_update),
+    {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    receive
+        {enats_client, Client, info_updated, Info} ->
+            ?assertEqual(2048, maps:get(max_payload, Info)),
+            ?assertEqual([{<<"updated">>, true}], maps:get(extra, Info))
+    after 1000 -> ct:fail(info_update_not_received)
+    end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 t_reconnect(_Config) ->
     {Server, Port} = start_fake_server(reconnect),
     {ok, Client} = enats_client:start_link(#{
@@ -1416,7 +1454,31 @@ t_reconnect_cancel(_Config) ->
     after 2000 -> ct:fail(reconnect_disconnect_not_observed)
     end,
     ?assertEqual(reconnecting, enats_client:status(Client)),
+    Client ! unexpected_reconnecting_event,
+    Client ! {'DOWN', make_ref(), process, self(), normal},
+    timer:sleep(1),
     ok = enats_client:disconnect(Client),
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_reconnect_exhausted(_Config) ->
+    {Server, Port} = start_fake_server(reconnect_exhaust),
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => Port,
+        reconnect => #{min_delay => 10, max_delay => 10, max_attempts => 1, jitter => 0.0},
+        owner => self()
+    }),
+    ok = enats_client:connect(Client),
+    receive
+        {enats_client, Client, disconnected, closed} -> ok
+    after 2000 -> ct:fail(initial_disconnect_not_observed)
+    end,
+    receive
+        {enats_client, Client, reconnect_exhausted, _Reason} -> ok
+    after 2000 -> ct:fail(reconnect_exhausted_not_observed)
+    end,
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
@@ -1456,6 +1518,9 @@ t_disconnect_while_connecting(_Config) ->
         {fake_server_accepted, InfoServer, silent} -> ok
     after 1000 -> ct:fail(fake_info_server_not_accepted)
     end,
+    InfoClient ! unexpected_waiting_info_event,
+    InfoClient ! {'DOWN', make_ref(), process, self(), normal},
+    timer:sleep(1),
     ?assertEqual(connecting, enats_client:status(InfoClient)),
     ?assertEqual(connecting, maps:get(status, enats_client:stats(InfoClient))),
     ?assertEqual({error, connecting}, enats_client:info(InfoClient)),
@@ -1478,6 +1543,9 @@ t_disconnect_while_connecting(_Config) ->
         {fake_server_accepted, PongServer, no_pong} -> ok
     after 1000 -> ct:fail(fake_pong_server_not_accepted)
     end,
+    PongClient ! unexpected_waiting_pong_event,
+    PongClient ! {'DOWN', make_ref(), process, self(), normal},
+    timer:sleep(1),
     ?assertEqual(connecting, enats_client:status(PongClient)),
     ?assertEqual(connecting, maps:get(status, enats_client:stats(PongClient))),
     ?assertEqual({error, connecting}, enats_client:info(PongClient)),
@@ -1766,6 +1834,17 @@ t_jetstream_no_responders(_Config) ->
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
+t_jetstream_status_rejected(_Config) ->
+    {Server, Port} = start_fake_server(jetstream_status_rejected),
+    {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, {jetstream, unavailable, <<"500">>}},
+        enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
+    ),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 t_tls_downgrade_rejected(_Config) ->
     {Server, Port} = start_fake_server(tls_unavailable),
     {ok, Client} = enats_client:start_link(#{
@@ -1906,6 +1985,10 @@ fake_server(Parent, Mode) ->
     case Mode of
         reconnect ->
             fake_reconnect(Listener, Parent);
+        reconnect_exhaust ->
+            fake_reconnect_exhaust(Listener);
+        info_update ->
+            fake_info_update(Listener);
         stale_reconnect ->
             fake_stale_reconnect(Listener, Parent);
         _ ->
@@ -2099,6 +2182,32 @@ fake_server(Parent, Mode) ->
                         <<"\r\n">>
                     ]),
                     timer:sleep(100);
+                jetstream_status_rejected ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    {ok, SubData0} = recv_until(Socket, <<"SUB ">>, InitialData),
+                    {ok, SubData} = recv_until(Socket, <<"\r\n">>, SubData0),
+                    [_, _Inbox, Sid | _] = binary:split(find_sub_line(SubData), <<" ">>, [global]),
+                    {ok, PubData0} = recv_until(Socket, <<"PUB ">>, SubData),
+                    {ok, PubData} = recv_until(Socket, <<"\r\n">>, PubData0),
+                    [_, _RequestSubject, ReplyTo | _] = binary:split(
+                        find_pub_line(PubData), <<" ">>, [global]
+                    ),
+                    Header = <<"NATS/1.0 500 Rejected\r\n\r\n">>,
+                    HeaderSize = byte_size(Header),
+                    ok = gen_tcp:send(Socket, [
+                        <<"HMSG ">>,
+                        ReplyTo,
+                        <<" ">>,
+                        Sid,
+                        <<" ">>,
+                        integer_to_binary(HeaderSize),
+                        <<" ">>,
+                        integer_to_binary(HeaderSize),
+                        <<"\r\n">>,
+                        Header,
+                        <<"\r\n">>
+                    ]),
+                    timer:sleep(100);
                 tls_unavailable ->
                     timer:sleep(100);
                 ipv6 ->
@@ -2163,6 +2272,32 @@ fake_reconnect(Listener, Parent) ->
     Parent ! {fake_server_reconnected, self()},
     timer:sleep(100),
     gen_tcp:close(Second),
+    gen_tcp:close(Listener).
+
+fake_reconnect_exhaust(Listener) ->
+    {ok, First} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(First, fake_info()),
+    {ok, _FirstData} = gen_tcp:recv(First, 0, 1000),
+    ok = gen_tcp:send(First, <<"PONG\r\n">>),
+    timer:sleep(20),
+    gen_tcp:close(First),
+    {ok, Second} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(Second, fake_info()),
+    {ok, _SecondData} = gen_tcp:recv(Second, 0, 1000),
+    gen_tcp:close(Second),
+    gen_tcp:close(Listener).
+
+fake_info_update(Listener) ->
+    {ok, Socket} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(Socket, fake_info()),
+    {ok, _InitialData} = gen_tcp:recv(Socket, 0, 1000),
+    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+    timer:sleep(20),
+    ok = gen_tcp:send(
+        Socket,
+        <<"INFO {\"proto\":1,\"headers\":true,\"max_payload\":2048,\"updated\":true}\r\n">>
+    ),
+    wait_socket_closed(Socket),
     gen_tcp:close(Listener).
 
 fake_stale_reconnect(Listener, Parent) ->

@@ -65,7 +65,7 @@ start_link(Options) ->
         Error -> Error
     end.
 -spec connect(pid()) -> error_result().
-connect(Pid) -> connect(Pid, ?TIMEOUT).
+connect(Pid) -> safe_call(Pid, connect, ?TIMEOUT).
 -spec connect(pid(), non_neg_integer() | infinity) -> error_result().
 connect(Pid, Timeout) -> safe_call(Pid, {connect, Timeout}, Timeout).
 -spec disconnect(pid()) -> error_result().
