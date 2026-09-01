@@ -37,6 +37,7 @@
     t_fake_connection_paths/1,
     t_protocol_error_disconnect/1,
     t_reconnect/1,
+    t_reconnect_cancel/1,
     t_stale_connection_reconnect/1,
     t_disconnect_while_connecting/1,
     t_topology_info/1,
@@ -101,6 +102,7 @@ all() ->
         t_fake_connection_paths,
         t_protocol_error_disconnect,
         t_reconnect,
+        t_reconnect_cancel,
         t_stale_connection_reconnect,
         t_disconnect_while_connecting,
         t_topology_info,
@@ -1389,10 +1391,33 @@ t_reconnect(_Config) ->
     end,
     ?assertEqual(reconnecting, enats_client:status(Client)),
     ?assertEqual(reconnecting, maps:get(status, enats_client:stats(Client))),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
+    {ok, _} = enats_client:diagnostics(Client),
+    ok = enats_client:disable_diagnostics(Client),
+    ?assertEqual({error, diagnostics_disabled}, enats_client:reset_diagnostics(Client)),
     receive
         {enats_client, Client, connected, _Info} -> ok
     after 2000 -> ct:fail(reconnect_not_observed)
     end,
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_reconnect_cancel(_Config) ->
+    {Server, Port} = start_fake_server(reconnect),
+    {ok, Client} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => Port,
+        reconnect => #{min_delay => 1000, max_delay => 1000, jitter => 0.0},
+        owner => self()
+    }),
+    ok = enats_client:connect(Client),
+    receive
+        {enats_client, Client, disconnected, closed} -> ok
+    after 2000 -> ct:fail(reconnect_disconnect_not_observed)
+    end,
+    ?assertEqual(reconnecting, enats_client:status(Client)),
+    ok = enats_client:disconnect(Client),
+    ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
