@@ -27,6 +27,7 @@
     t_invalid_options/1,
     t_unknown_options/1,
     t_invalid_publish_timeout/1,
+    t_publish_batch/1,
     t_canonical_no_responders/1,
     t_request_without_headers/1,
     t_invalid_headers/1,
@@ -97,6 +98,7 @@ all() ->
         t_invalid_options,
         t_unknown_options,
         t_invalid_publish_timeout,
+        t_publish_batch,
         t_canonical_no_responders,
         t_request_without_headers,
         t_invalid_headers,
@@ -305,6 +307,14 @@ t_invalid_options(_Config) ->
     ?assertEqual(
         {error, {invalid_option, max_parser_buffer, 0}},
         enats_client:start_link(#{max_parser_buffer => 0})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, max_publish_batch_messages, 0}},
+        enats_client:start_link(#{max_publish_batch_messages => 0})
+    ),
+    ?assertEqual(
+        {error, {invalid_option, max_publish_batch_bytes, 0}},
+        enats_client:start_link(#{max_publish_batch_bytes => 0})
     ).
 
 t_unknown_options(Config) ->
@@ -336,6 +346,121 @@ t_invalid_publish_timeout(_Config) ->
             self(), <<"subject">>, <<"payload">>, #{reply_to => <<"reply">>, timeout => bad}
         )
     ).
+
+t_publish_batch(Config) ->
+    {ok, Client} = enats_client:start_link(#{
+        port => ?config(port, Config), owner => self(), max_publish_batch_messages => 2
+    }),
+    ok = enats_client:connect(Client),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"batch.test">>, #{}),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:publish_batch(Client, [
+        #{subject => <<"batch.test">>, payload => <<"one">>},
+        #{subject => <<"batch.test">>, payload => <<"two">>}
+    ]),
+    ok = enats_client:flush(Client, 1000),
+    ?assertEqual(<<"one">>, receive_batch_payload(Client, 1000)),
+    ?assertEqual(<<"two">>, receive_batch_payload(Client, 1000)),
+    ok = enats_client:publish_batch(Client, []),
+    ?assertEqual({error, invalid_timeout}, enats_client:publish_batch(Client, [], bad_timeout)),
+    ?assertEqual({error, invalid_options}, enats_client:publish_batch(Client, bad, 1000)),
+    ?assertEqual(
+        {error, {batch_too_large, messages, 3, 2}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"batch.test">>, payload => <<"one">>},
+            #{subject => <<"batch.test">>, payload => <<"two">>},
+            #{subject => <<"batch.test">>, payload => <<"three">>}
+        ])
+    ),
+    ?assertMatch(
+        {error, {batch_too_large, messages, 3, 2}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"batch.test">>, payload => <<"one">>},
+            #{subject => <<"batch.test">>, payload => <<"two">>},
+            #{subject => <<"batch.test">>, payload => bad}
+        ])
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_client:publish_batch(Client, [#{subject => <<"batch.test">>, payload => bad}])
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"batch.test">>, payload => <<"one">>, unknown => true}
+        ])
+    ),
+    {ok, LimitedClient} = enats_client:start_link(#{
+        port => ?config(port, Config), max_publish_batch_bytes => 1
+    }),
+    ok = enats_client:connect(LimitedClient),
+    ?assertMatch(
+        {error, {batch_too_large, bytes, _, 1}},
+        enats_client:publish_batch(LimitedClient, [
+            #{subject => <<"batch.test">>, payload => <<"one">>}
+        ])
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_client:publish_batch(Client, [bad], 1000)
+    ),
+    ?assertMatch(
+        {error, {invalid_batch_message, 1, _}},
+        enats_client:publish_batch(
+            Client,
+            [
+                #{subject => <<"batch.test">>, payload => <<"one">>, headers => bad}
+            ],
+            1000
+        )
+    ),
+    ok = enats_client:publish_batch(Client, [
+        #{
+            subject => <<"batch.test">>,
+            payload => <<"headers">>,
+            headers => [{<<"X-Test">>, <<"yes">>}],
+            reply_to => <<"batch.reply">>
+        }
+    ]),
+    ok = enats_client:flush(Client, 1000),
+    receive
+        {enats_client, Client,
+            {message, #{
+                payload := <<"headers">>,
+                headers := [{<<"X-Test">>, <<"yes">>}],
+                reply_to := <<"batch.reply">>
+            }}} ->
+            ok
+    after 1000 ->
+        ct:fail(batch_headers_not_received)
+    end,
+    ok = enats_client:stop(LimitedClient),
+    ok = enats_client:stop(Client),
+    {ok, DefaultClient} = enats_client:start_link(#{
+        port => ?config(port, Config), owner => self()
+    }),
+    ok = enats_client:connect(DefaultClient),
+    Many = [#{subject => <<"batch.unlimited">>, payload => <<"x">>} || _ <- lists:seq(1, 257)],
+    ok = enats_client:publish_batch(DefaultClient, Many),
+    ok = enats_client:flush(DefaultClient, 1000),
+    LargePayload = binary:copy(<<"x">>, 600 * 1024),
+    ok = enats_client:publish_batch(DefaultClient, [
+        #{subject => <<"batch.unlimited">>, payload => LargePayload},
+        #{subject => <<"batch.unlimited">>, payload => LargePayload}
+    ]),
+    ok = enats_client:flush(DefaultClient, 1000),
+    ok = enats_client:stop(DefaultClient),
+    {ok, InfinityClient} = enats_client:start_link(#{
+        port => ?config(port, Config),
+        max_publish_batch_messages => infinity,
+        max_publish_batch_bytes => infinity
+    }),
+    ok = enats_client:connect(InfinityClient),
+    ok = enats_client:publish_batch(InfinityClient, [
+        #{subject => <<"batch.infinity">>, payload => <<"ok">>}
+    ]),
+    ok = enats_client:flush(InfinityClient, 1000),
+    ok = enats_client:stop(InfinityClient).
 
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, invalid_options}, enats_client:start_link(not_a_map)),
@@ -445,6 +570,22 @@ t_diagnostics(Config) ->
     ok = enats_client:reset_diagnostics(Client),
     {ok, Reset} = enats_client:diagnostics(Client),
     ?assertEqual(#{}, maps:get(latencies, Reset)),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
+    {ok, _Subscription} = enats_client:subscribe(Client, <<"diagnostics.delivery">>, #{}),
+    ok = enats_client:publish(Client, <<"diagnostics.delivery">>, <<"payload">>),
+    ok = enats_client:flush(Client, 1000),
+    ?assertEqual(<<"payload">>, receive_batch_payload(Client, 1000)),
+    {ok, DeliverySnapshot} = enats_client:diagnostics(Client),
+    ?assert(maps:is_key(delivery_latency, maps:get(latencies, DeliverySnapshot))),
+    ok = enats_client:reset_diagnostics(Client),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 2}),
+    ok = enats_client:publish(Client, <<"diagnostics.unsampled">>, <<"payload">>),
+    ok = enats_client:flush(Client, 1000),
+    ok = enats_client:publish(Client, <<"diagnostics.delivery">>, <<"payload">>),
+    ok = enats_client:flush(Client, 1000),
+    ?assertEqual(<<"payload">>, receive_batch_payload(Client, 1000)),
+    {ok, UnsampledSnapshot} = enats_client:diagnostics(Client),
+    ?assertEqual(false, maps:is_key(delivery_latency, maps:get(latencies, UnsampledSnapshot))),
     ok = enats_client:disable_diagnostics(Client),
     ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
     ok = enats_client:stop(Client).
@@ -477,6 +618,7 @@ t_slow_consumer(Config) ->
         owner => self(),
         slow_consumer_limit => 0
     }),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     BeforeMonitors = client_monitor_count(Client),
     {ok, _Subscription} = enats_client:subscribe(Client, <<"slow.test">>, #{owner => SlowOwner}),
@@ -566,6 +708,14 @@ slow_owner() ->
     receive
         stop -> ok;
         _Message -> slow_owner()
+    end.
+
+receive_batch_payload(Client, Timeout) ->
+    receive
+        {enats_client, Client, {message, #{payload := Payload}}} -> Payload;
+        _Other -> receive_batch_payload(Client, Timeout)
+    after Timeout ->
+        timeout
     end.
 
 t_canonical_no_responders(_Config) ->
@@ -760,6 +910,16 @@ t_server_limits(_Config) ->
     ?assertEqual(
         {error, headers_not_supported},
         enats_client:publish(Client, <<"limits">>, <<"ok">>, #{headers => [{<<"x">>, <<"y">>}]})
+    ),
+    ?assertEqual(
+        {error, {invalid_batch_message, 1, headers_not_supported}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"limits">>, payload => <<"ok">>, headers => [{<<"x">>, <<"y">>}]}
+        ])
+    ),
+    ?assertEqual(
+        {error, {invalid_batch_message, 1, {payload_too_large, 3}}},
+        enats_client:publish_batch(Client, [#{subject => <<"limits">>, payload => <<"1234">>}])
     ),
     ok = enats_client:stop(Client),
     exit(Server, normal).

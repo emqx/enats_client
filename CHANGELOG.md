@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+Add batch publishing with opt-in admission limits, optimize subscription
+routing, parser ingress and disabled diagnostics, and expose reproducible
+benchmark modes.
+
 ## 0.1.11
 
 This release consolidates the authentication implementation, switches JSON
