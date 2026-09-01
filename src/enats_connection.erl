@@ -815,7 +815,7 @@ process_connect_info(Info, Base, State) ->
                                             request_sid => RequestSid,
                                             next_sid => maps:get(next_sid, State) + 1
                                         },
-                                        []};
+                                        [{state_timeout, attempt_timeout(State), connect_timeout}]};
                                 {error, Reason} ->
                                     connect_failed(waiting_info, {transport, Reason}, State)
                             end;

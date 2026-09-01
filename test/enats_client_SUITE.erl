@@ -33,6 +33,7 @@
     t_tls/1,
     t_connection_errors/1,
     t_connect_pong_timeout/1,
+    t_connect_pong_deadline/1,
     t_connection_queries/1,
     t_fake_connection_paths/1,
     t_protocol_error_disconnect/1,
@@ -101,6 +102,7 @@ all() ->
         t_tls,
         t_connection_errors,
         t_connect_pong_timeout,
+        t_connect_pong_deadline,
         t_connection_queries,
         t_fake_connection_paths,
         t_protocol_error_disconnect,
@@ -1336,6 +1338,14 @@ t_connect_pong_timeout(_Config) ->
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
+t_connect_pong_deadline(_Config) ->
+    {Server, Port} = start_fake_server(hang),
+    {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
+    ?assertEqual({error, timeout}, enats_client:connect(Client, 50)),
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 t_connection_queries(Config) ->
     {ok, Client} = enats_client:start_link(#{
         host => "127.0.0.1", port => ?config(port, Config), owner => self()
@@ -2024,6 +2034,9 @@ fake_server(Parent, Mode) ->
                     timer:sleep(500);
                 no_pong ->
                     timer:sleep(500);
+                hang ->
+                    timer:sleep(2000),
+                    wait_socket_closed(Socket);
                 topology ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>);
                 server_limits ->
