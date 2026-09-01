@@ -1341,7 +1341,7 @@ t_connect_pong_timeout(_Config) ->
 t_connect_pong_deadline(_Config) ->
     {Server, Port} = start_fake_server(hang),
     {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
-    ?assertEqual({error, timeout}, enats_client:connect(Client, 50)),
+    ?assertEqual({error, timeout}, enats_client:connect(Client, 200)),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
