@@ -1919,7 +1919,7 @@ fake_server(Parent, Mode) ->
                     timer:sleep(500);
                 coalesced_flush ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\nPING\r\n">>),
-                    {ok, _ClientData} = recv_until(Socket, <<"PING\r\n">>, <<>>),
+                    {ok, _ClientData} = recv_until_nth(Socket, <<"PING\r\n">>, 2, InitialData),
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     wait_socket_closed(Socket);
                 flush_concurrent ->
