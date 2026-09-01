@@ -1582,7 +1582,7 @@ diagnostic_call(From, reset, _Options, State) ->
 
 stats_snapshot(StateName, State) ->
     #{
-        status => StateName,
+        status => stats_status(StateName),
         current_server => maps:get(current_server, State, undefined),
         reconnect_attempts => maps:get(reconnect_attempt, State, 0),
         subscriptions => map_size(maps:get(subscriptions, State)),
@@ -1591,6 +1591,10 @@ stats_snapshot(StateName, State) ->
         diagnostics_enabled => maps:get(enabled, maps:get(diagnostics, State), false),
         last_error => maps:get(last_error, State, undefined)
     }.
+
+stats_status(waiting_info) -> connecting;
+stats_status(waiting_pong) -> connecting;
+stats_status(StateName) -> StateName.
 
 diagnostics_snapshot(State) ->
     Diagnostics = maps:get(diagnostics, State),

@@ -32,8 +32,10 @@
     t_user_password/1,
     t_tls/1,
     t_connection_errors/1,
+    t_connect_pong_timeout/1,
     t_connection_queries/1,
     t_fake_connection_paths/1,
+    t_protocol_error_disconnect/1,
     t_reconnect/1,
     t_stale_connection_reconnect/1,
     t_disconnect_while_connecting/1,
@@ -94,8 +96,10 @@ all() ->
         t_user_password,
         t_tls,
         t_connection_errors,
+        t_connect_pong_timeout,
         t_connection_queries,
         t_fake_connection_paths,
+        t_protocol_error_disconnect,
         t_reconnect,
         t_stale_connection_reconnect,
         t_disconnect_while_connecting,
@@ -345,15 +349,27 @@ t_invalid_public_inputs(Config) ->
     ?assertEqual({error, invalid_timeout}, enats_client:connect(Client, bad_timeout)),
     ?assertEqual(true, is_process_alive(Client)),
     ?assertEqual(
+        {error, invalid_timeout},
+        enats_client:request(Client, <<"input.test">>, <<"p">>, #{}, bad_timeout)
+    ),
+    ?assertEqual(
         {error, invalid_options},
         enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options, 10)
     ),
     ?assertEqual({error, invalid_timeout}, enats_client:flush(Client, bad_timeout)),
+    ?assertMatch({error, {invalid_option, servers, _}}, enats_client:start_link(#{servers => []})),
+    ?assertEqual(
+        {error, {invalid_option, servers, bad}}, enats_client:start_link(#{servers => bad})
+    ),
     ok = enats_client:stop(Client).
 
 t_diagnostics(Config) ->
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
+    ?assertEqual(
+        {error, {invalid_option, message_sample_every, 0}},
+        enats_client:enable_diagnostics(Client, #{message_sample_every => 0})
+    ),
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     ok = enats_client:publish(Client, <<"diagnostics.test">>, <<"payload">>),
@@ -942,6 +958,38 @@ t_auth_helpers(_Config) ->
         enats_auth:connect_params(
             #{mechanism => token, token => (fun() -> erlang:error(bad) end)}, #{}, #{}
         )
+    ),
+    ?assertEqual(
+        {error, nkey_nonce_missing},
+        enats_auth:connect_params(
+            #{mechanism => nkey_seed, seed => Seed}, #{}, #{}
+        )
+    ),
+    ?assertEqual({error, invalid_secret_type}, enats_auth:resolve_secret(fun() -> bad end)),
+    ?assertEqual(
+        {error, secret_provider_failed}, enats_auth:resolve_secret(fun() -> {error, bad} end)
+    ),
+    ?assertEqual({error, invalid_credentials_type}, enats_auth:validate_credentials(not_binary)),
+    ?assertMatch(
+        {error, {credentials_file, _}}, enats_auth:validate_credentials_file("/no/such/file")
+    ),
+    ?assertEqual(ok, enats_auth:validate(#{mechanism => token, token => <<"token">>})),
+    ?assertEqual(ok, enats_auth:validate(#{mechanism => nkey_seed, seed => Seed})),
+    ?assertEqual(
+        ok,
+        enats_auth:validate(#{
+            mechanism => nkey, public_key => <<"key">>, sign_fun => fun(_) -> <<"sig">> end
+        })
+    ),
+    ?assertEqual(ok, enats_auth:validate(#{mechanism => credentials, provider => <<"creds">>})),
+    ?assertEqual(
+        ok,
+        enats_auth:validate(#{
+            mechanism => jwt,
+            jwt => <<"jwt">>,
+            public_key => <<"key">>,
+            sign_fun => fun(_) -> <<"sig">> end
+        })
     ).
 
 t_nkey_helpers(_Config) ->
@@ -1249,6 +1297,14 @@ t_connection_errors(_Config) ->
     ok = enats_client:stop(Client),
     ok.
 
+t_connect_pong_timeout(_Config) ->
+    {Server, Port} = start_fake_server(no_pong),
+    {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
+    ?assertMatch({error, _}, enats_client:connect(Client, 50)),
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 t_connection_queries(Config) ->
     {ok, Client} = enats_client:start_link(#{
         host => "127.0.0.1", port => ?config(port, Config), owner => self()
@@ -1302,13 +1358,27 @@ t_fake_connection_paths(_Config) ->
     ok = enats_client:stop(CloseClient),
     exit(CloseServer, normal).
 
+t_protocol_error_disconnect(_Config) ->
+    {Server, Port} = start_fake_server(invalid_frame),
+    {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
+    ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
+    ok = enats_client:connect(Client),
+    receive
+        {enats_client, Client, disconnected, {server_error, {unknown_frame, <<"BOGUS">>}}} -> ok
+    after 1000 -> ct:fail(protocol_error_not_reported)
+    end,
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    {ok, Snapshot} = enats_client:diagnostics(Client),
+    ?assert(maps:get(protocol_errors, maps:get(counters, Snapshot)) >= 1),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
 t_reconnect(_Config) ->
     {Server, Port} = start_fake_server(reconnect),
     {ok, Client} = enats_client:start_link(#{
         host => "127.0.0.1",
         port => Port,
-        reconnect => true,
-        reconnect_delay => 20,
+        reconnect => #{min_delay => 20, max_delay => 40, multiplier => 2.0, jitter => 0.0},
         owner => self()
     }),
     ok = enats_client:connect(Client),
@@ -1331,8 +1401,7 @@ t_stale_connection_reconnect(_Config) ->
     {ok, Client} = enats_client:start_link(#{
         host => "127.0.0.1",
         port => Port,
-        reconnect => true,
-        reconnect_delay => 10,
+        reconnect => #{min_delay => 10, max_delay => 20, multiplier => 2.0, jitter => 0.1},
         ping_interval => 20,
         max_pings_out => 1,
         owner => self()
@@ -1363,7 +1432,9 @@ t_disconnect_while_connecting(_Config) ->
     after 1000 -> ct:fail(fake_info_server_not_accepted)
     end,
     ?assertEqual(connecting, enats_client:status(InfoClient)),
+    ?assertEqual(connecting, maps:get(status, enats_client:stats(InfoClient))),
     ?assertEqual({error, connecting}, enats_client:info(InfoClient)),
+    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(InfoClient)),
     ok = enats_client:disconnect(InfoClient),
     receive
         {connect_result, {error, disconnected}} -> ok
@@ -1383,7 +1454,9 @@ t_disconnect_while_connecting(_Config) ->
     after 1000 -> ct:fail(fake_pong_server_not_accepted)
     end,
     ?assertEqual(connecting, enats_client:status(PongClient)),
+    ?assertEqual(connecting, maps:get(status, enats_client:stats(PongClient))),
     ?assertEqual({error, connecting}, enats_client:info(PongClient)),
+    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(PongClient)),
     ok = enats_client:disconnect(PongClient),
     receive
         {pong_connect_result, {error, disconnected}} -> ok
@@ -1397,7 +1470,10 @@ t_topology_info(_Config) ->
     {ok, Client} = enats_client:start_link(#{servers => [{"127.0.0.1", Port}], owner => self()}),
     ok = enats_client:connect(Client),
     Info = enats_client:info(Client),
-    ?assertEqual([<<"nats://127.0.0.1:14222">>, <<"bad">>], maps:get(connect_urls, Info)),
+    ?assertEqual(
+        [<<"nats://127.0.0.1:14222">>, <<"nats://[::1]:14222">>, <<"bad">>],
+        maps:get(connect_urls, Info)
+    ),
     ?assertEqual([{<<"untrusted">>, <<"untrusted">>}], maps:get(extra, Info)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
@@ -1825,6 +1901,11 @@ fake_server(Parent, Mode) ->
             case Mode of
                 server_error ->
                     ok = gen_tcp:send(Socket, <<"-ERR \"bad\"\r\n">>);
+                invalid_frame ->
+                    ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
+                    timer:sleep(20),
+                    ok = gen_tcp:send(Socket, <<"BOGUS\r\n">>),
+                    wait_socket_closed(Socket);
                 close_without_pong ->
                     ok;
                 silent ->
@@ -2083,7 +2164,7 @@ fake_info_without_headers() ->
     <<"INFO {\"proto\":1,\"headers\":false,\"max_payload\":1048576}\r\n">>.
 
 fake_topology_info() ->
-    <<"INFO {\"proto\":1,\"headers\":true,\"connect_urls\":[\"nats://127.0.0.1:14222\",\"bad\"],\"untrusted\":\"untrusted\"}\r\n">>.
+    <<"INFO {\"proto\":1,\"headers\":true,\"connect_urls\":[\"nats://127.0.0.1:14222\",\"nats://[::1]:14222\",\"bad\"],\"untrusted\":\"untrusted\"}\r\n">>.
 
 fake_limits_info() ->
     <<"INFO {\"proto\":1,\"headers\":false,\"max_payload\":3}\r\n">>.
