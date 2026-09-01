@@ -16,8 +16,8 @@
     | ping
     | pong
     | ok
-    | {error, binary()}
-    | {payload, #{atom() => binary()}, non_neg_integer()}
+    | {error, binary() | {unknown_frame, binary()}}
+    | {payload, #{atom() => atom() | binary() | integer()}, non_neg_integer()}
     | #{
         type := msg | hmsg,
         subject := binary(),
@@ -88,23 +88,31 @@ initial_state(Options) ->
 parse(Data, #{buffer := Buffer, pending := Pending} = State) when is_binary(Data) ->
     parse_loop(<<Buffer/binary, Data/binary>>, State#{buffer => <<>>, pending => Pending}, []).
 
-parse_loop(Bin, #{limits := #{max_parser_buffer := MaxBuffer}}, _Acc) when
-    byte_size(Bin) > MaxBuffer
-->
-    error(parser_buffer_limit);
 parse_loop(
     _Bin, #{pending := {_Meta, Need}, limits := #{max_message_size := MaxMessage}}, _Acc
 ) when
     Need > MaxMessage
 ->
     error(payload_too_large);
+parse_loop(
+    Bin,
+    #{pending := {_Meta, Need}, limits := #{max_parser_buffer := MaxBuffer}},
+    _Acc
+) when byte_size(Bin) < Need + 2, byte_size(Bin) > MaxBuffer ->
+    error(parser_buffer_limit);
 parse_loop(Bin, #{pending := {_Meta, Need}} = State, Acc) when byte_size(Bin) < Need + 2 ->
     {lists:reverse(Acc), State#{buffer => Bin}};
 parse_loop(Bin, #{pending := {Meta, Need}} = State, Acc) ->
     <<Body:Need/binary, "\r\n", Rest/binary>> = Bin,
     parse_loop(Rest, State#{pending => undefined}, [complete_payload(Meta, Body) | Acc]);
-parse_loop(Bin, #{limits := #{max_control_line := MaxLine}} = State, Acc) ->
+parse_loop(
+    Bin,
+    #{limits := #{max_control_line := MaxLine, max_parser_buffer := MaxBuffer}} = State,
+    Acc
+) ->
     case binary:match(Bin, <<"\r\n">>) of
+        nomatch when byte_size(Bin) > MaxBuffer ->
+            error(parser_buffer_limit);
         nomatch when byte_size(Bin) > MaxLine ->
             error(control_line_too_long);
         nomatch ->
@@ -131,18 +139,24 @@ parse_message([Subject, Sid, Size], msg) ->
 parse_message([Subject, Sid, ReplyTo, Size], msg) ->
     {payload, #{type => msg, subject => Subject, sid => Sid, reply_to => ReplyTo}, to_int(Size)};
 parse_message([Subject, Sid, HeaderSize, TotalSize], hmsg) ->
-    {payload, #{type => hmsg, subject => Subject, sid => Sid, header_size => to_int(HeaderSize)},
-        to_int(TotalSize)};
+    HeaderSizeValue = to_int(HeaderSize),
+    TotalSizeValue = to_int(TotalSize),
+    true = HeaderSizeValue =< TotalSizeValue,
+    {payload, #{type => hmsg, subject => Subject, sid => Sid, header_size => HeaderSizeValue},
+        TotalSizeValue};
 parse_message([Subject, Sid, ReplyTo, HeaderSize, TotalSize], hmsg) ->
+    HeaderSizeValue = to_int(HeaderSize),
+    TotalSizeValue = to_int(TotalSize),
+    true = HeaderSizeValue =< TotalSizeValue,
     {payload,
         #{
             type => hmsg,
             subject => Subject,
             sid => Sid,
             reply_to => ReplyTo,
-            header_size => to_int(HeaderSize)
+            header_size => HeaderSizeValue
         },
-        to_int(TotalSize)}.
+        TotalSizeValue}.
 
 complete_payload(#{type := msg} = Meta, Body) ->
     Meta#{payload => Body};

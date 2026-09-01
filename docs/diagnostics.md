@@ -9,3 +9,8 @@ latencies for transport connect, NATS connect, total connect, publish,
 request, JetStream publish and owner delivery. Message metrics use the
 configured deterministic sampling interval and do not retain payloads,
 subjects or credentials.
+
+Counters include connection attempts/failures/reconnects, started and timed
+out requests, slow consumers, protocol/transport errors, and messages in/out.
+All counters and histograms are held in bounded in-memory maps and are reset
+with `reset_diagnostics/1`.

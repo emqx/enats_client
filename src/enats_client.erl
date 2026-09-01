@@ -165,15 +165,19 @@
     | pid()
     | reference()
     | boolean()
+    | undefined
     | [error_value()]
     | {error_value(), error_value()}
-    | {error_value(), error_value(), error_value()}.
+    | {error_value(), error_value(), error_value()}
+    | {error_value(), error_value(), error_value(), error_value()}
+    | {error_value(), error_value(), error_value(), error_value(), error_value()}.
 -type error_reason() ::
     invalid_subject
     | wildcard_subject_not_allowed
     | invalid_options
     | invalid_payload
     | invalid_headers
+    | invalid_argument
     | invalid_timeout
     | disconnected
     | connecting
@@ -189,11 +193,19 @@
     | closed
     | stale_connection
     | requested
+    | {invalid_option, atom()}
     | {invalid_option, atom(), error_value()}
+    | {invalid_headers, error_value()}
+    | {invalid_header_name, binary()}
+    | {invalid_header_value, binary()}
+    | {invalid_header, error_value()}
     | {payload_too_large, pos_integer()}
     | {server_error, binary()}
-    | {transport, atom()}
-    | {tls_upgrade_failed, atom()}
+    | {transport, error_value()}
+    | {tls_upgrade_failed, error_value()}
+    | {invalid_ssl_options, error_value()}
+    | {protocol, error_value()}
+    | {auth, error_value()}
     | {no_responders, binary()}
     | {disconnected, error_value()}
     | {client_exit, error_value()}
@@ -392,6 +404,8 @@ validate_start_options(Options) ->
         validate_port(maps:get(port, Options, 4222)),
         validate_servers(maps:get(servers, Options, undefined)),
         validate_boolean(tls, maps:get(tls, Options, false)),
+        validate_tls_handshake(maps:get(tls_handshake, Options, starttls)),
+        validate_ssl_opts(maps:get(ssl_opts, Options, [])),
         validate_boolean(notify, maps:get(notify, Options, true)),
         validate_owner(maps:get(owner, Options, self())),
         validate_option_timeout(connect_timeout, maps:get(connect_timeout, Options, 5000)),
@@ -449,11 +463,25 @@ validate_delay_range(Options) ->
 validate_nonnegative_integer(_Name, Value) when is_integer(Value), Value >= 0 -> ok;
 validate_nonnegative_integer(Name, Value) -> {error, {invalid_option, Name, Value}}.
 
-validate_host(Value) when is_binary(Value); is_list(Value) -> ok;
+validate_host(Value) when is_binary(Value), byte_size(Value) > 0 ->
+    validate_host_text(Value);
+validate_host(Value) when is_list(Value), Value =/= [] ->
+    try unicode:characters_to_binary(Value) of
+        Binary when is_binary(Binary) -> validate_host_text(Binary);
+        _ -> {error, {invalid_option, host, Value}}
+    catch
+        _:_ -> {error, {invalid_option, host, Value}}
+    end;
 validate_host(Value) ->
     case inet:is_ip_address(Value) of
         true -> ok;
         false -> {error, {invalid_option, host, Value}}
+    end.
+
+validate_host_text(Value) ->
+    case binary:match(Value, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>]) of
+        nomatch -> ok;
+        _ -> {error, {invalid_option, host, Value}}
     end.
 
 validate_port(Value) when is_integer(Value), Value > 0, Value =< 65535 -> ok;
@@ -479,6 +507,13 @@ validate_servers(Value) ->
 
 validate_boolean(_Name, Value) when is_boolean(Value) -> ok;
 validate_boolean(Name, Value) -> {error, {invalid_option, Name, Value}}.
+
+validate_tls_handshake(starttls) -> ok;
+validate_tls_handshake(first) -> ok;
+validate_tls_handshake(Value) -> {error, {invalid_option, tls_handshake, Value}}.
+
+validate_ssl_opts(Value) when is_list(Value) -> ok;
+validate_ssl_opts(Value) -> {error, {invalid_option, ssl_opts, Value}}.
 
 validate_owner(Value) when is_pid(Value) -> ok;
 validate_owner(Value) -> {error, {invalid_option, owner, Value}}.
@@ -551,10 +586,16 @@ validate_option_headers(_Headers) ->
 
 validate_option_reply_to(undefined, Options) ->
     validate_option_timeout(timeout, maps:get(timeout, Options, 5000));
-validate_option_reply_to(ReplyTo, _Options) when is_binary(ReplyTo) ->
-    case valid_protocol_token(ReplyTo) of
-        true -> ok;
-        false -> {error, {invalid_option, reply_to}}
+validate_option_reply_to(ReplyTo, Options) when is_binary(ReplyTo) ->
+    case
+        {
+            valid_protocol_token(ReplyTo),
+            validate_option_timeout(timeout, maps:get(timeout, Options, 5000))
+        }
+    of
+        {true, ok} -> ok;
+        {false, _} -> {error, {invalid_option, reply_to}};
+        {_, Error} -> Error
     end;
 validate_option_reply_to(_ReplyTo, _Options) ->
     {error, {invalid_option, reply_to}}.
@@ -579,10 +620,16 @@ with_subject(_Subject, _AllowWildcard, _Fun) ->
     {error, invalid_subject}.
 
 with_payload(Payload0, Fun) ->
-    try
-        Fun(iolist_to_binary(Payload0))
+    case payload_to_binary(Payload0) of
+        {ok, Payload} -> Fun(Payload);
+        {error, invalid_payload} = Error -> Error
+    end.
+
+payload_to_binary(Payload0) ->
+    try iolist_to_binary(Payload0) of
+        Payload -> {ok, Payload}
     catch
-        _:_ -> {error, invalid_payload}
+        error:badarg -> {error, invalid_payload}
     end.
 
 jetstream_request(Client, Subject, Payload, Headers, Timeout) ->

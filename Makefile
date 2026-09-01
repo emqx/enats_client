@@ -6,10 +6,10 @@ compile:
 	rebar3 compile
 
 test:
-	rebar3 ct --suite test/enats_client_SUITE.erl
+	rebar3 ct
 
 coverage:
-	rebar3 ct --cover --suite test/enats_client_SUITE.erl
+	rebar3 ct --cover
 	coverage=$$(rebar3 cover --verbose 2>&1 | awk -F'|' '/total/{gsub("%","",$$3); print $$3+0}'); test "$$coverage" -ge 75
 
 dialyzer:

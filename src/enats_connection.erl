@@ -159,6 +159,7 @@ init(Options0) ->
         nats_started_at => undefined,
         delivery_started_at => undefined,
         drain_from => undefined,
+        drain_barrier_done => false,
         reconnect_attempt => 0
     }}.
 
@@ -172,7 +173,7 @@ disconnected({call, From}, status, _State) ->
 disconnected({call, From}, info, State) ->
     reply(From, maps:get(server_info, State));
 disconnected({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(disconnected, State));
 disconnected({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 disconnected({call, From}, {enable_diagnostics, Options}, State) ->
@@ -237,7 +238,7 @@ waiting_info(state_timeout, connect_timeout, State) ->
 waiting_info({call, From}, status, _State) ->
     reply(From, connecting);
 waiting_info({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(waiting_info, State));
 waiting_info({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 waiting_info({call, From}, disconnect, State) ->
@@ -270,7 +271,7 @@ waiting_pong(state_timeout, connect_timeout, State) ->
 waiting_pong({call, From}, status, _State) ->
     reply(From, connecting);
 waiting_pong({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(waiting_pong, State));
 waiting_pong({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 waiting_pong({call, From}, disconnect, State) ->
@@ -291,7 +292,7 @@ connected({call, From}, status, _State) ->
 connected({call, From}, info, State) ->
     reply(From, maps:get(server_info, State));
 connected({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(connected, State));
 connected({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 connected({call, From}, {enable_diagnostics, Options}, State) ->
@@ -334,10 +335,7 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
                     ReplyTo = <<Inbox/binary, ".", Token/binary>>,
                     RequestOptions = Options#{
                         reply_to => ReplyTo,
-                        headers => [
-                            {<<"Nats-Request-Info">>, <<"true">>}
-                            | maps:get(headers, Options, [])
-                        ]
+                        headers => request_headers(Options, State)
                     },
                     case validate_publish_options(Payload, RequestOptions, State) of
                         {error, Reason} ->
@@ -366,8 +364,9 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
                                         },
                                         maps:get(requests, SampledState)
                                     ),
+                                    CountedState = record_counter(requests_started, SampledState),
                                     {keep_state,
-                                        SampledState#{
+                                        CountedState#{
                                             requests => Requests,
                                             next_sid => maps:get(next_sid, State) + 1
                                         },
@@ -466,12 +465,13 @@ connected(_, _, State) ->
 draining({call, From}, status, _State) ->
     reply(From, draining);
 draining({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(draining, State));
 draining({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 draining({call, From}, disconnect, State) ->
     close(State),
     reply_flushes(State, {error, disconnected}),
+    reply_requests(State, {error, disconnected}),
     {next_state, disconnected, clear_socket(clear_subscriptions(State)), reply_action(From, ok)};
 draining({call, From}, _Request, _State) ->
     reply(From, {error, draining});
@@ -484,13 +484,16 @@ draining(info, {tcp_passive, Socket}, #{socket := {tcp, Socket}} = State) ->
 draining(info, {ssl_passive, Socket}, #{socket := {ssl, Socket}} = State) ->
     rearm_socket(State);
 draining(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
-    lost(draining, closed, State);
+    drain_failed(closed, State);
 draining(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
-    lost(draining, closed, State);
+    drain_failed(closed, State);
 draining(info, {flush_timeout, Ref}, State) ->
     State1 = expire_flush(Ref, State),
     close(State1),
+    reply_requests(State1, {error, timeout}),
     {next_state, disconnected, clear_socket(clear_subscriptions(State1)), []};
+draining(info, {request_timeout, Sid}, State) ->
+    request_timeout(Sid, State);
 draining(info, {'DOWN', Monitor, process, _Owner, _Reason}, State) ->
     owner_down(Monitor, State);
 draining(_, _, State) ->
@@ -506,7 +509,13 @@ drain_call(From, Timeout, State) ->
                         kind => drain, ref => Ref, from => From, timer => flush_timer(Timeout, Ref)
                     },
                     Flushes = queue:in(Drain, maps:get(flushes, State)),
-                    {next_state, draining, State#{flushes => Flushes}, []};
+                    {next_state, draining,
+                        State#{
+                            flushes => Flushes,
+                            drain_from => undefined,
+                            drain_barrier_done => false
+                        },
+                        []};
                 {error, Reason} ->
                     lost_with_reply(From, Reason, State)
             end;
@@ -528,7 +537,9 @@ request_timeout(Sid, State) ->
     case maps:take(Sid, maps:get(requests, State)) of
         {#{from := From}, Requests} ->
             gen_statem:reply(From, {error, timeout}),
-            {keep_state, State#{requests => Requests}, []};
+            maybe_finish_drain(
+                record_counter(requests_timed_out, State#{requests => Requests})
+            );
         error ->
             keep(State)
     end.
@@ -561,12 +572,19 @@ complete_pong(#{flushes := Flushes0} = State) ->
 complete_pong_transition(State) ->
     case complete_pong(State) of
         {drained, #{drain_from := From} = State1} ->
-            gen_statem:reply(From, ok),
-            close(State1),
-            {next_state, disconnected, clear_socket(clear_subscriptions(State1)), []};
+            maybe_finish_drain(State1#{drain_barrier_done => true, drain_from => From});
         State1 ->
             {keep_state, State1, []}
     end.
+
+maybe_finish_drain(#{drain_barrier_done := true, requests := Requests} = State) when
+    map_size(Requests) =:= 0
+->
+    gen_statem:reply(maps:get(drain_from, State), ok),
+    close(State),
+    {next_state, disconnected, clear_socket(clear_subscriptions(State)), []};
+maybe_finish_drain(State) ->
+    {keep_state, State, []}.
 
 heartbeat(#{pings_out := PingsOut, options := Options} = State) ->
     MaxPingsOut = maps:get(max_pings_out, Options),
@@ -654,7 +672,7 @@ reconnecting(state_timeout, reconnect, State) ->
 reconnecting({call, From}, status, _State) ->
     reply(From, reconnecting);
 reconnecting({call, From}, stats, State) ->
-    reply(From, stats_snapshot(State));
+    reply(From, stats_snapshot(reconnecting, State));
 reconnecting({call, From}, diagnostics, State) ->
     reply(From, diagnostics_snapshot(State));
 reconnecting({call, From}, {enable_diagnostics, Options}, State) ->
@@ -726,11 +744,16 @@ process_frame({info, RawInfo}, connected, State) ->
     {keep_state, State1, []};
 process_frame(pong, waiting_pong, State) ->
     MeasuredState = record_connect_latencies(State),
-    reply_connect(MeasuredState, ok),
-    restore_subscriptions(MeasuredState),
-    notify(MeasuredState, connected, maps:get(server_info, MeasuredState)),
+    ReconnectedState =
+        case maps:get(reconnect_attempt, State, 0) > 0 of
+            true -> record_counter(reconnects, MeasuredState);
+            false -> MeasuredState
+        end,
+    reply_connect(ReconnectedState, ok),
+    restore_subscriptions(ReconnectedState),
+    notify(ReconnectedState, connected, maps:get(server_info, ReconnectedState)),
     {next_state, connected,
-        start_heartbeat(clear_pending_connect(MeasuredState#{reconnect_attempt => 0})), []};
+        start_heartbeat(clear_pending_connect(ReconnectedState#{reconnect_attempt => 0})), []};
 process_frame({error, Reason}, waiting_info, State) ->
     connect_failed(waiting_info, {server_error, Reason}, State);
 process_frame({error, Reason}, waiting_pong, State) ->
@@ -746,6 +769,10 @@ process_frame(pong, connected, State) ->
     complete_pong_transition(State);
 process_frame(pong, draining, State) ->
     complete_pong_transition(State);
+process_frame(#{type := msg} = Message, draining, State) ->
+    maybe_finish_drain(deliver(Message, State));
+process_frame(#{type := hmsg} = Message, draining, State) ->
+    maybe_finish_drain(deliver(Message, State));
 process_frame(#{type := msg} = Message, connected, State) ->
     {keep_state, deliver(Message, State), []};
 process_frame(#{type := hmsg} = Message, connected, State) ->
@@ -840,7 +867,10 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
     Index = maps:get(server_index, State),
     {Host, Port} = lists:nth(Index, Servers),
     NextIndex = next_server_index(Index, length(Servers)),
-    State1 = State#{server_index => NextIndex, current_server => {Host, Port}},
+    State1 = record_counter(
+        connect_attempts,
+        State#{server_index => NextIndex, current_server => {Host, Port}}
+    ),
     TransportStartedAt = diagnostic_now(State1),
     case open_transport(Host, Port, Options, Timeout) of
         {ok, Socket} ->
@@ -851,14 +881,15 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
             ),
             {ok, Socket, State2#{nats_started_at => diagnostic_now(State2)}};
         {error, _Reason} when Attempts > 1 ->
+            FailedState = record_counter(connect_failures, State1),
             open_socket(
-                State1,
+                FailedState,
                 Attempts - 1,
                 Options,
                 remaining_timeout(maps:get(connect_deadline, State1, infinity))
             );
         {error, Reason} ->
-            {error, Reason, State1}
+            {error, Reason, record_counter(connect_failures, State1)}
     end;
 open_socket(State, _Attempts, _Options, _Timeout) ->
     {error, timeout, State}.
@@ -878,7 +909,7 @@ open_transport(
     Timeout
 ) ->
     ssl_result(
-        ssl:connect(
+        safe_ssl_connect(
             Host,
             Port,
             transport_options(
@@ -902,6 +933,13 @@ open_transport(Host, Port, #{socket_active_n := ActiveN}, Timeout) ->
         )
     ).
 
+safe_ssl_connect(Host, Port, Options, Timeout) ->
+    try ssl:connect(Host, Port, Options, Timeout) of
+        Result -> Result
+    catch
+        error:Reason -> {error, {invalid_ssl_options, Reason}}
+    end.
+
 ssl_result({ok, Socket}) -> {ok, {ssl, Socket}};
 ssl_result(Error) -> Error.
 maybe_upgrade_tls(
@@ -923,7 +961,7 @@ maybe_upgrade_tls(
                 {server_name_indication, tls_server_name(Host)}
                 | maps:get(ssl_opts, Options)
             ]),
-            case ssl:connect(Socket, SslOpts, connection_timeout(State)) of
+            case safe_ssl_upgrade(Socket, SslOpts, connection_timeout(State)) of
                 {ok, SslSocket} -> {ok, State#{socket => {ssl, SslSocket}}};
                 Error -> Error
             end
@@ -934,6 +972,13 @@ maybe_upgrade_tls(Info, #{options := Options} = State) ->
     case maps:get(tls, Options) andalso maps:get(tls_required, Info, false) of
         true -> {error, tls_already_established};
         false -> {ok, State}
+    end.
+
+safe_ssl_upgrade(Socket, Options, Timeout) ->
+    try ssl:connect(Socket, Options, Timeout) of
+        Result -> Result
+    catch
+        error:Reason -> {error, {invalid_ssl_options, Reason}}
     end.
 
 send_frame({connect, Params}, #{socket := Socket}) ->
@@ -966,6 +1011,13 @@ publish_frame(Subject, Payload, Options) ->
             end;
         Headers ->
             {hpub, Subject, maps:get(reply_to, Options, undefined), Headers, Payload}
+    end.
+
+request_headers(Options, State) ->
+    Headers = maps:get(headers, Options, []),
+    case maps:get(headers, maps:get(server_info, State), true) of
+        true -> [{<<"Nats-Request-Info">>, <<"true">>} | Headers];
+        false -> Headers
     end.
 
 timed_publish(Subject, Payload, Options, State) ->
@@ -1070,7 +1122,17 @@ deliver_subscription(Message, State) ->
                     true ->
                         _ = send_frame({unsub, Sid}, State),
                         notify(State, slow_consumer, #{subscription => Ref}),
-                        State#{subscriptions => maps:remove(Ref, maps:get(subscriptions, State))};
+                        maybe_demonitor(
+                            maps:get(
+                                monitor, maps:get(Ref, maps:get(subscriptions, State)), undefined
+                            )
+                        ),
+                        record_counter(
+                            slow_consumers,
+                            State#{
+                                subscriptions => maps:remove(Ref, maps:get(subscriptions, State))
+                            }
+                        );
                     false ->
                         {Measure, SampledState} = take_message_sample(delivery_latency, State),
                         Owner ! {enats_client, self(), {message, Message}},
@@ -1126,8 +1188,15 @@ maybe_unsubscribe(Sid, State) ->
     _ = send_frame({unsub, Sid}, State),
     ok.
 
+drain_failed(Reason, State) ->
+    close(State),
+    reply_flushes(State, {error, {disconnected, Reason}}),
+    reply_requests(State, {error, {disconnected, Reason}}),
+    notify(State, disconnected, Reason),
+    {next_state, disconnected, clear_socket(clear_subscriptions(State)), []}.
+
 lost(_StateName, Reason, State) ->
-    State0 = State#{last_error => Reason},
+    State0 = record_counter(error_counter(Reason), State#{last_error => Reason}),
     close(State0),
     reply_connect(State0, {error, Reason}),
     reply_flushes(State0, {error, {disconnected, Reason}}),
@@ -1143,6 +1212,13 @@ lost(_StateName, Reason, State) ->
                     {state_timeout, reconnect_delay(ReconnectState), reconnect}
                 ]}
     end.
+
+error_counter({protocol, _}) -> protocol_errors;
+error_counter({transport, _}) -> transport_errors;
+error_counter({tls, _}) -> transport_errors;
+error_counter({tls_upgrade_failed, _}) -> transport_errors;
+error_counter({server_error, _}) -> protocol_errors;
+error_counter(_) -> transport_errors.
 
 lost_with_reply(From, Reason, State) ->
     gen_statem:reply(From, {error, Reason}),
@@ -1205,7 +1281,9 @@ clear_pending_connect(State) ->
         connect_from => undefined,
         connect_attempts => 0,
         pending_connect_timeout => undefined,
-        connect_deadline => undefined
+        connect_deadline => undefined,
+        drain_from => undefined,
+        drain_barrier_done => false
     }.
 
 reset_transport(State) ->
@@ -1225,12 +1303,18 @@ close(#{socket := {tcp, Socket}}) -> gen_tcp:close(Socket);
 close(#{socket := {ssl, Socket}}) -> ssl:close(Socket).
 validate_options(Options) when is_map(Options) ->
     case maps:get(tls_handshake, Options, starttls) of
-        starttls -> validate_heartbeat_options(Options);
-        first -> validate_heartbeat_options(Options);
+        starttls -> validate_ssl_option_container(Options);
+        first -> validate_ssl_option_container(Options);
         Value -> {error, {invalid_option, tls_handshake, Value}}
     end;
 validate_options(Options) ->
     {error, {invalid_options, Options}}.
+
+validate_ssl_option_container(Options) ->
+    case maps:get(ssl_opts, Options, []) of
+        SslOpts when is_list(SslOpts) -> validate_heartbeat_options(Options);
+        SslOpts -> {error, {invalid_option, ssl_opts, SslOpts}}
+    end.
 
 validate_heartbeat_options(Options) ->
     PingInterval = maps:get(ping_interval, Options, 120000),
@@ -1293,12 +1377,30 @@ normalize_options(Options) ->
     ).
 
 normalize_tls_options(Options) ->
-    case {maps:get(tls, Options, false), maps:get(ssl_opts, Options, [])} of
-        {true, []} ->
-            Options#{ssl_opts => [{verify, verify_peer}, {cacerts, public_key:cacerts_get()}]};
-        _ ->
-            Options
+    case maps:get(tls, Options, false) of
+        false ->
+            Options;
+        true ->
+            SslOpts0 = maps:get(ssl_opts, Options, []),
+            Verify = proplists:get_value(verify, SslOpts0, verify_peer),
+            SslOpts1 = ensure_ssl_option(verify, Verify, SslOpts0),
+            SslOpts = ensure_system_cacerts(Verify, SslOpts1),
+            Options#{ssl_opts => SslOpts}
     end.
+
+ensure_ssl_option(Key, Value, Options) ->
+    case proplists:is_defined(Key, Options) of
+        true -> Options;
+        false -> [{Key, Value} | Options]
+    end.
+
+ensure_system_cacerts(verify_peer, Options) ->
+    case proplists:is_defined(cacerts, Options) orelse proplists:is_defined(cacertfile, Options) of
+        true -> Options;
+        false -> [{cacerts, public_key:cacerts_get()} | Options]
+    end;
+ensure_system_cacerts(_Verify, Options) ->
+    Options.
 
 parser_state(Options) ->
     enats_frame:initial_state(
@@ -1478,26 +1580,17 @@ diagnostic_call(From, reset, _Options, State) ->
             reply(From, {error, diagnostics_disabled})
     end.
 
-stats_snapshot(State) ->
+stats_snapshot(StateName, State) ->
     #{
-        status => state_status(State),
+        status => StateName,
         current_server => maps:get(current_server, State, undefined),
-        reconnect_attempts => maps:get(connect_attempts, State, 0),
+        reconnect_attempts => maps:get(reconnect_attempt, State, 0),
         subscriptions => map_size(maps:get(subscriptions, State)),
         pending_requests => map_size(maps:get(requests, State)),
         pending_flushes => queue:len(maps:get(flushes, State)),
         diagnostics_enabled => maps:get(enabled, maps:get(diagnostics, State), false),
         last_error => maps:get(last_error, State, undefined)
     }.
-
-state_status(#{socket := Socket, connect_from := From}) when
-    Socket =/= undefined, From =/= undefined
-->
-    connecting;
-state_status(#{socket := undefined, connect_from := From}) when From =/= undefined -> connecting;
-state_status(#{socket := Socket}) when Socket =/= undefined -> connected;
-state_status(_State) ->
-    disconnected.
 
 diagnostics_snapshot(State) ->
     Diagnostics = maps:get(diagnostics, State),
@@ -1616,7 +1709,9 @@ next_server_index(Index, _Count) -> Index + 1.
 update_servers(#{connect_urls := Urls}, State) when is_list(Urls) ->
     Existing = maps:get(configured_servers, State, maps:get(servers, State)),
     Discovered = [Server || Url <- Urls, {ok, Server} <- [parse_server_url(Url)]],
-    State#{servers => unique_servers(Existing ++ Discovered)};
+    Servers = unique_servers(Existing ++ Discovered),
+    Index = min(maps:get(server_index, State, 1), length(Servers)),
+    State#{servers => Servers, server_index => Index};
 update_servers(_Info, State) ->
     State.
 

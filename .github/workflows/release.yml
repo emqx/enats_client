@@ -12,11 +12,25 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: "27"
           rebar3-version: "3"
+      - name: Install nats-server
+        run: |
+          version=2.11.6
+          archive="nats-server-v${version}-linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/${archive}" \
+            --output /tmp/nats-server.tar.gz
+          checksum=$(curl --fail --silent --show-error --location \
+            "https://github.com/nats-io/nats-server/releases/download/v${version}/SHA256SUMS" \
+            | awk -v name="${archive}" '$2 == name {print $1}')
+          test -n "$checksum"
+          echo "$checksum  /tmp/nats-server.tar.gz" | sha256sum --check
+          tar -xzf /tmp/nats-server.tar.gz -C /tmp
+          echo "/tmp/nats-server-v${version}-linux-amd64" >> "$GITHUB_PATH"
       - name: Check release version
         run: |
           tag="$(git describe --tags --exact-match)"

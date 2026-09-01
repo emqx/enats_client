@@ -17,8 +17,8 @@ jobs:
         otp: ["27", "28"]
         nats: ["2.10.26", "2.11.6"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: erlef/setup-beam@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           otp-version: ${{ matrix.otp }}
           rebar3-version: "3"
