@@ -41,9 +41,6 @@ jobs:
           test "$tag" = "$changelog"
       - run: make release_checks
       - run: rebar3 hex build
-      - run: rebar3 hex publish --yes
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
