@@ -2,8 +2,8 @@
 
 ## 0.1.12
 
-Add bounded batch and asynchronous publish APIs, optimize subscription routing,
-parser ingress and disabled diagnostics, and expose reproducible benchmark modes.
+Add bounded batch publishing, optimize subscription routing, parser ingress and
+disabled diagnostics, and expose reproducible benchmark modes.
 
 ## 0.1.11
 
