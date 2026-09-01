@@ -313,6 +313,10 @@ t_invalid_publish_timeout(_Config) ->
 
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, invalid_options}, enats_client:start_link(not_a_map)),
+    Dead = spawn(fun() -> ok end),
+    timer:sleep(1),
+    ?assertEqual({error, disconnected}, enats_connection:status(Dead)),
+    ?assertEqual(ok, enats_connection:stop(Dead)),
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ChildSpec = enats_client:child_spec(#{id => diagnostics_test}),
     ?assertEqual(diagnostics_test, maps:get(id, ChildSpec)),

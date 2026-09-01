@@ -10,7 +10,7 @@ test:
 
 coverage:
 	rebar3 ct --cover
-	coverage=$$(rebar3 cover --verbose 2>&1 | awk -F'|' '/total/{gsub("%","",$$3); print $$3+0}'); test "$$coverage" -ge 85
+	coverage=$$(rebar3 cover --verbose 2>&1 | awk -F'|' '/total/{gsub("%","",$$3); print $$3+0}'); echo "coverage=$$coverage"; test "$$coverage" -ge 85
 
 dialyzer:
 	rebar3 dialyzer

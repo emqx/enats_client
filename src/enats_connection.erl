@@ -75,6 +75,7 @@ stop(Pid) ->
     try gen_statem:stop(Pid) of
         ok -> ok
     catch
+        exit:noproc -> ok;
         exit:{noproc, _} -> ok;
         exit:Reason -> {error, {client_exit, Reason}}
     end.
