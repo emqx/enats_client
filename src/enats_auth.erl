@@ -59,10 +59,7 @@ connect_params(Auth, Info, Base) ->
         authentication,
         case {is_map(Info), is_map(Base)} of
             {true, true} ->
-                case validate_raw(Auth) of
-                    ok -> connect_params_raw(Auth, Info, Base);
-                    Error -> Error
-                end;
+                connect_params_raw(Auth, Info, Base);
             _ ->
                 {error, {invalid, options, bad_type}}
         end
@@ -100,7 +97,9 @@ connect_params_raw(
     case signed_connect_params(PublicKey, SignFun, Info, Base) of
         {ok, Params} -> with_secret(JWT, fun(Value) -> {ok, Params#{jwt => Value}} end);
         Error -> Error
-    end.
+    end;
+connect_params_raw(_Auth, _Info, _Base) ->
+    {error, invalid_credentials}.
 
 -spec validate(auth()) -> ok | {error, auth_error()}.
 validate(Auth) -> enats_error:wrap(authentication, validate_raw(Auth)).
