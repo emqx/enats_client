@@ -17,7 +17,7 @@
     redact/1
 ]).
 
--type secret_provider(T) :: T | fun(() -> T | {ok, T} | {error, auth_error()}).
+-type secret_provider(T) :: T | fun(() -> T | {ok, T} | {error, term()}).
 -type auth() ::
     none
     | #{mechanism := user_password, username := binary(), password := secret_provider(binary())}
@@ -55,7 +55,18 @@
 -spec connect_params(auth(), connect_map(), connect_map()) ->
     {ok, connect_map()} | {error, auth_error()}.
 connect_params(Auth, Info, Base) ->
-    enats_error:wrap(authentication, connect_params_raw(Auth, Info, Base)).
+    enats_error:wrap(
+        authentication,
+        case {is_map(Info), is_map(Base)} of
+            {true, true} ->
+                case validate_raw(Auth) of
+                    ok -> connect_params_raw(Auth, Info, Base);
+                    Error -> Error
+                end;
+            _ ->
+                {error, {invalid, options, bad_type}}
+        end
+    ).
 
 connect_params_raw(none, _Info, Base) ->
     {ok, Base};
@@ -185,13 +196,28 @@ validate_credentials_raw(_Contents) ->
 validate_credentials_file(Filename) when is_binary(Filename); is_list(Filename) ->
     enats_error:wrap(
         validate_credentials_file,
-        case file:read_file(Filename) of
-            {ok, Contents} -> validate_credentials(Contents);
-            {error, Reason} -> {error, {credentials_file, Reason}}
+        case valid_filename(Filename) of
+            true ->
+                case file:read_file(Filename) of
+                    {ok, Contents} -> validate_credentials(Contents);
+                    {error, Reason} -> {error, {credentials_file, Reason}}
+                end;
+            false ->
+                {error, invalid_credentials_type}
         end
     );
 validate_credentials_file(_Filename) ->
     enats_error:wrap(validate_credentials_file, {error, invalid_credentials_type}).
+
+valid_filename(Filename) when is_binary(Filename) ->
+    byte_size(Filename) > 0 andalso binary:match(Filename, <<0>>) =:= nomatch;
+valid_filename(Filename) ->
+    try unicode:characters_to_binary(Filename) of
+        Path when is_binary(Path) -> valid_filename(Path);
+        _ -> false
+    catch
+        error:badarg -> false
+    end.
 
 -spec encode_nkey_public(binary()) -> binary().
 encode_nkey_public(PublicKey) when is_binary(PublicKey), byte_size(PublicKey) =:= 32 ->

@@ -73,14 +73,16 @@ connect(Pid, Timeout) -> safe_call(Pid, {connect, Timeout}, Timeout).
 -spec disconnect(pid()) -> error_result().
 disconnect(Pid) -> safe_call(Pid, disconnect, ?TIMEOUT).
 -spec stop(pid()) -> error_result().
-stop(Pid) ->
+stop(Pid) when is_pid(Pid) ->
     try gen_statem:stop(Pid) of
         ok -> ok
     catch
         exit:noproc -> ok;
         exit:{noproc, _} -> ok;
         exit:Reason -> {error, {client_exit, Reason}}
-    end.
+    end;
+stop(_Pid) ->
+    {error, {invalid, client, bad_type}}.
 -spec status(pid()) -> enats_client:status() | {error, raw_error_reason()}.
 status(Pid) -> safe_call(Pid, status, ?TIMEOUT).
 -spec info(pid()) -> enats_client:server_info() | {error, raw_error_reason()}.
@@ -122,7 +124,7 @@ diagnostics(Pid) -> safe_call(Pid, diagnostics, ?TIMEOUT).
 -spec reset_diagnostics(pid()) -> error_result().
 reset_diagnostics(Pid) -> safe_call(Pid, reset_diagnostics, ?TIMEOUT).
 
-safe_call(Pid, Request, Timeout) ->
+safe_call(Pid, Request, Timeout) when is_pid(Pid) ->
     CallTimeout =
         case Timeout of
             infinity -> infinity;
@@ -134,7 +136,9 @@ safe_call(Pid, Request, Timeout) ->
         exit:{timeout, _} -> {error, timeout};
         exit:{noproc, _} -> {error, disconnected};
         exit:Reason -> {error, {client_exit, Reason}}
-    end.
+    end;
+safe_call(_Pid, _Request, _Timeout) ->
+    {error, {invalid, client, bad_type}}.
 
 -spec callback_mode() -> state_functions.
 callback_mode() -> state_functions.
@@ -700,9 +704,10 @@ reconnecting(state_timeout, reconnect, State) ->
                         [
                             {state_timeout, attempt_timeout(State1), connect_timeout}
                         ]};
-                {error, _Reason, State1} ->
+                {error, Reason, State1} ->
                     NextState = State1#{
-                        reconnect_attempt => maps:get(reconnect_attempt, State1, 0) + 1
+                        reconnect_attempt => maps:get(reconnect_attempt, State1, 0) + 1,
+                        last_error => enats_error:normalize(connect, Reason)
                     },
                     {keep_state, NextState, [
                         {state_timeout, reconnect_delay(NextState), reconnect}

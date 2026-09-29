@@ -780,9 +780,17 @@ decode_pub_ack(Payload) ->
         _:_ -> {error, {jetstream, invalid_ack, invalid_payload}}
     end.
 
-classify_pub_ack_error(#{<<"code">> := Code}) when is_integer(Code), Code >= 500 ->
-    {error, {jetstream, unavailable, Code}};
-classify_pub_ack_error(#{<<"code">> := Code}) when is_integer(Code) ->
-    {error, {jetstream, rejected, Code}};
+classify_pub_ack_error(#{<<"code">> := Code} = Error) when is_integer(Code), Code >= 0 ->
+    Kind =
+        case Code >= 500 of
+            true -> unavailable;
+            false -> rejected
+        end,
+    case maps:get(<<"err_code">>, Error, undefined) of
+        ErrCode when is_integer(ErrCode), ErrCode >= 0 ->
+            {error, {jetstream, Kind, Code, ErrCode}};
+        _ ->
+            {error, {jetstream, Kind, Code}}
+    end;
 classify_pub_ack_error(_Error) ->
     {error, {jetstream, rejected, invalid_payload}}.

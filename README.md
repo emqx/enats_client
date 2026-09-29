@@ -204,7 +204,8 @@ For example, an invalid subject returns
 A bad batch item adds `index` to those details. A JetStream 503 response
 returns `server_error` with `source => jetstream`, `code => unavailable`, and
 `status => 503`. Unknown option names are reported in `details.keys` without
-echoing credential values.
+echoing credential values. When a JetStream PubAck includes `err_code`, its
+numeric value is retained in `details.err_code`.
 
 An interrupted flush or request may have reached the server. Such errors
 include `outcome => unknown`; callers choose their own retry and deduplication

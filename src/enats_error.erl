@@ -50,18 +50,7 @@
     operation := read_credentials | resolve_secret | sign_nonce,
     code := file:posix() | provider_failed | signer_failed
 }.
--type connection_cause() ::
-    disconnected
-    | closed
-    | stale_connection
-    | econnrefused
-    | econnreset
-    | nxdomain
-    | timeout
-    | tls_not_available
-    | tls_failed
-    | no_servers_available
-    | other.
+-type connection_cause() :: atom().
 -type connection_details() :: #{phase := atom(), cause := connection_cause(), outcome => unknown}.
 -type timeout_details() :: #{phase := atom(), outcome => unknown}.
 -type protocol_details() :: #{
@@ -70,7 +59,12 @@
 -type server_details() ::
     #{source := core, code := nats_error, message := binary()}
     | #{source := core, code := no_responders, status := non_neg_integer()}
-    | #{source := jetstream, code := unavailable | rejected, status := non_neg_integer()}.
+    | #{
+        source := jetstream,
+        code := unavailable | rejected,
+        status := non_neg_integer(),
+        err_code => non_neg_integer()
+    }.
 -type internal_details() :: #{operation := atom(), code := client_exit | unexpected_failure}.
 
 -type error() ::
@@ -182,6 +176,17 @@ normalize(_Operation, {jetstream, Kind, Status}) when Kind =:= unavailable; Kind
         error ->
             make(protocol_error, #{phase => puback, code => invalid_ack})
     end;
+normalize(_Operation, {jetstream, Kind, Status, ErrCode}) when
+    (Kind =:= unavailable orelse Kind =:= rejected), is_integer(ErrCode), ErrCode >= 0
+->
+    case status(Status) of
+        {ok, Code} ->
+            make(server_error, #{
+                source => jetstream, code => Kind, status => Code, err_code => ErrCode
+            });
+        error ->
+            make(protocol_error, #{phase => puback, code => invalid_ack})
+    end;
 normalize(_Operation, {jetstream, invalid_ack, _}) ->
     make(protocol_error, #{phase => puback, code => invalid_ack});
 normalize(Operation, {client_exit, _Cause}) ->
@@ -207,18 +212,7 @@ connection(Operation, Cause) ->
         false -> make(connection_failed, Details)
     end.
 
-connection_cause(Cause) when
-    Cause =:= disconnected;
-    Cause =:= closed;
-    Cause =:= stale_connection;
-    Cause =:= econnrefused;
-    Cause =:= econnreset;
-    Cause =:= nxdomain;
-    Cause =:= timeout;
-    Cause =:= tls_not_available;
-    Cause =:= tls_failed;
-    Cause =:= no_servers_available
-->
+connection_cause(Cause) when is_atom(Cause) ->
     Cause;
 connection_cause(_) ->
     other.
