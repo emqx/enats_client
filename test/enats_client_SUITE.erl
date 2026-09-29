@@ -1707,6 +1707,7 @@ t_connection_errors(_Config) ->
         tls_handshake => first,
         ssl_opts => [{bad_option, true}]
     }),
+    unlink(TlsClient),
     RawTlsError = enats_connection:connect(TlsClient),
     ?assertEqual(
         {3, invalid, ssl_opts},
