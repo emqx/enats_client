@@ -993,7 +993,9 @@ safe_ssl_connect(Host, Port, Options, Timeout) ->
     end.
 
 classify_ssl_result({error, Reason}) when
-    is_tuple(Reason), tuple_size(Reason) >= 2, element(1, Reason) =:= options
+    is_tuple(Reason),
+    tuple_size(Reason) >= 2,
+    (element(1, Reason) =:= options orelse element(1, Reason) =:= badarg)
 ->
     {error, {invalid, ssl_opts, bad_value}};
 classify_ssl_result(Result) ->

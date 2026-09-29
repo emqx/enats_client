@@ -1707,23 +1707,8 @@ t_connection_errors(_Config) ->
         tls_handshake => first,
         ssl_opts => [{bad_option, true}]
     }),
-    unlink(TlsClient),
-    RawTlsError = enats_connection:connect(TlsClient),
     ?assertEqual(
-        {3, invalid, ssl_opts},
-        case RawTlsError of
-            {error, Reason} when is_tuple(Reason), tuple_size(Reason) >= 2 ->
-                Second = element(2, Reason),
-                SecondShape =
-                    case Second of
-                        Value when is_atom(Value) -> Value;
-                        Value when is_tuple(Value) -> {tuple, element(1, Value)};
-                        _ -> other
-                    end,
-                {tuple_size(Reason), element(1, Reason), SecondShape};
-            Other ->
-                Other
-        end
+        {error, expected_badarg(ssl_opts, bad_value)}, enats_client:connect(TlsClient)
     ),
     ok = enats_client:stop(TlsClient),
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => 1, owner => self()}),
