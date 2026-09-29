@@ -344,6 +344,10 @@ t_error_contract(_Config) ->
     ?assertEqual(
         #{reason => timeout, details => #{phase => flush, outcome => unknown}},
         enats_error:normalize(flush, timeout)
+    ),
+    ?assertEqual(
+        #{reason => connection_failed, details => #{phase => connect, cause => enetunreach}},
+        enats_error:normalize(connect, {transport, enetunreach})
     ).
 
 t_unknown_options(Config) ->
@@ -504,6 +508,8 @@ t_publish_batch(Config) ->
 
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, expected_badarg(options, bad_type)}, enats_client:start_link(not_a_map)),
+    ?assertEqual({error, expected_badarg(client, bad_type)}, enats_client:status(42)),
+    ?assertEqual({error, expected_badarg(client, bad_type)}, enats_client:stop(42)),
     Dead = spawn(fun() -> ok end),
     timer:sleep(1),
     ?assertEqual({error, disconnected}, enats_connection:status(Dead)),
@@ -1189,6 +1195,26 @@ t_frame_variants(_Config) ->
 
 t_auth_helpers(_Config) ->
     {ok, #{}} = enats_auth:connect_params(none, #{}, #{}),
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)},
+        enats_auth:connect_params(#{mechanism => bogus}, #{}, #{})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(options, bad_type)},
+        enats_auth:connect_params(none, bad_info, #{})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:credentials_file([bad])
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate_credentials_file(<<>>)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate_credentials_file(<<0>>)
+    ),
     ?assertEqual(ok, enats_auth:validate(none)),
     ?assertEqual(
         {error, expected_badarg(authentication, invalid_credentials)}, enats_auth:validate(#{})
@@ -1803,10 +1829,17 @@ t_reconnect_exhausted(_Config) ->
     after 2000 -> ct:fail(initial_disconnect_not_observed)
     end,
     receive
-        {enats_client, Client, reconnect_exhausted, _Reason} -> ok
+        {enats_client, Client, reconnect_exhausted, #{
+            reason := connection_failed, details := #{cause := econnrefused}
+        }} ->
+            ok
     after 2000 -> ct:fail(reconnect_exhausted_not_observed)
     end,
     ?assertEqual(disconnected, enats_client:status(Client)),
+    ?assertMatch(
+        #{reason := connection_failed, details := #{cause := econnrefused}},
+        maps:get(last_error, enats_client:stats(Client))
+    ),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
@@ -2223,7 +2256,9 @@ t_jetstream_json_rejected(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        expected_error(server_error, #{source => jetstream, code => rejected, status => 400}),
+        expected_error(server_error, #{
+            source => jetstream, code => rejected, status => 400, err_code => 10071
+        }),
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2598,7 +2633,14 @@ fake_server(Parent, Mode) ->
                             jetstream_json_unavailable -> 503;
                             jetstream_json_rejected -> 400
                         end,
-                    Payload = <<"{\"error\":{\"code\":", (integer_to_binary(Code))/binary, "}}">>,
+                    ErrCode =
+                        case JsonMode of
+                            jetstream_json_rejected -> <<",\"err_code\":10071">>;
+                            jetstream_json_unavailable -> <<>>
+                        end,
+                    Payload =
+                        <<"{\"error\":{\"code\":", (integer_to_binary(Code))/binary, ErrCode/binary,
+                            "}}">>,
                     ok = gen_tcp:send(Socket, [
                         <<"MSG ">>,
                         ReplyTo,
@@ -2655,12 +2697,8 @@ fake_reconnect_exhaust(Listener) ->
     {ok, _FirstData} = gen_tcp:recv(First, 0, 1000),
     ok = gen_tcp:send(First, <<"PONG\r\n">>),
     timer:sleep(20),
-    gen_tcp:close(First),
-    {ok, Second} = gen_tcp:accept(Listener),
-    ok = gen_tcp:send(Second, fake_info()),
-    {ok, _SecondData} = gen_tcp:recv(Second, 0, 1000),
-    gen_tcp:close(Second),
-    gen_tcp:close(Listener).
+    gen_tcp:close(Listener),
+    gen_tcp:close(First).
 
 fake_info_update(Listener) ->
     {ok, Socket} = gen_tcp:accept(Listener),
