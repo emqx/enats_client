@@ -133,7 +133,6 @@ normalize(Operation, {disconnected, Cause}) ->
     case Cause of
         {server_error, _} -> normalize(Operation, Cause);
         {protocol, _} -> normalize(Operation, Cause);
-        {invalid, _, _} -> normalize(Operation, Cause);
         _ -> connection(Operation, Cause)
     end;
 normalize(Operation, disconnected) ->

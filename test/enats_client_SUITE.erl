@@ -1195,6 +1195,24 @@ t_frame_variants(_Config) ->
 
 t_auth_helpers(_Config) ->
     {ok, #{}} = enats_auth:connect_params(none, #{}, #{}),
+    BadUsername = #{mechanism => user_password, username => 42, password => <<"secret">>},
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)},
+        enats_auth:validate(BadUsername)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)},
+        enats_auth:connect_params(BadUsername, #{}, #{})
+    ),
+    BadNkey = #{mechanism => nkey, public_key => 42, sign_fun => fun(_) -> <<"sig">> end},
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)},
+        enats_auth:connect_params(BadNkey, #{nonce => <<"nonce">>}, #{})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)},
+        enats_auth:connect_params(BadNkey#{sign_fun => bad}, #{}, #{})
+    ),
     ?assertEqual(
         {error, expected_badarg(authentication, invalid_credentials)},
         enats_auth:connect_params(#{mechanism => bogus}, #{}, #{})
@@ -1206,6 +1224,18 @@ t_auth_helpers(_Config) ->
     ?assertEqual(
         {error, expected_badarg(authentication, bad_type)},
         enats_auth:credentials_file([bad])
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:credentials_file([<<"/no/such/file">>])
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate_credentials_file([<<"/no/such/file">>])
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate_credentials_file([$/ | bad])
     ),
     ?assertEqual(
         {error, expected_badarg(authentication, bad_type)},
@@ -1242,6 +1272,10 @@ t_auth_helpers(_Config) ->
         enats_auth:connect_params(
             #{mechanism => token, token => 42}, #{}, #{}
         )
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate(#{mechanism => token, token => 42})
     ),
     ?assertEqual(
         expected_error(protocol_error, #{phase => authentication, code => missing_nonce}),

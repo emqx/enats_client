@@ -59,7 +59,10 @@ connect_params(Auth, Info, Base) ->
         authentication,
         case {is_map(Info), is_map(Base)} of
             {true, true} ->
-                connect_params_raw(Auth, Info, Base);
+                case validate_raw(Auth) of
+                    ok -> connect_params_raw(Auth, Info, Base);
+                    Error -> Error
+                end;
             _ ->
                 {error, {invalid, options, bad_type}}
         end
@@ -97,9 +100,7 @@ connect_params_raw(
     case signed_connect_params(PublicKey, SignFun, Info, Base) of
         {ok, Params} -> with_secret(JWT, fun(Value) -> {ok, Params#{jwt => Value}} end);
         Error -> Error
-    end;
-connect_params_raw(_Auth, _Info, _Base) ->
-    {error, invalid_credentials}.
+    end.
 
 -spec validate(auth()) -> ok | {error, auth_error()}.
 validate(Auth) -> enats_error:wrap(authentication, validate_raw(Auth)).
@@ -107,31 +108,28 @@ validate(Auth) -> enats_error:wrap(authentication, validate_raw(Auth)).
 validate_raw(none) ->
     ok;
 validate_raw(#{mechanism := user_password, username := Username, password := Password}) when
-    is_binary(Username), (is_binary(Password) orelse is_function(Password, 0))
+    is_binary(Username)
 ->
-    ok;
-validate_raw(#{mechanism := token, token := Token}) when
-    is_binary(Token); is_function(Token, 0)
-->
-    ok;
-validate_raw(#{mechanism := nkey_seed, seed := Seed}) when
-    is_binary(Seed); is_function(Seed, 0)
-->
-    ok;
+    validate_secret_provider(Password);
+validate_raw(#{mechanism := token, token := Token}) ->
+    validate_secret_provider(Token);
+validate_raw(#{mechanism := nkey_seed, seed := Seed}) ->
+    validate_secret_provider(Seed);
 validate_raw(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}) when
     is_binary(PublicKey), is_function(SignFun, 1)
 ->
     ok;
-validate_raw(#{mechanism := credentials, provider := Provider}) when
-    is_binary(Provider); is_function(Provider, 0)
-->
-    ok;
+validate_raw(#{mechanism := credentials, provider := Provider}) ->
+    validate_secret_provider(Provider);
 validate_raw(#{mechanism := jwt, jwt := JWT, public_key := PublicKey, sign_fun := SignFun}) when
-    (is_binary(JWT) orelse is_function(JWT, 0)), is_binary(PublicKey), is_function(SignFun, 1)
+    is_binary(PublicKey), is_function(SignFun, 1)
 ->
-    ok;
+    validate_secret_provider(JWT);
 validate_raw(_Auth) ->
     {error, invalid_credentials}.
+
+validate_secret_provider(Value) when is_binary(Value); is_function(Value, 0) -> ok;
+validate_secret_provider(_Value) -> {error, invalid_secret_type}.
 
 -spec describe(auth()) -> atom().
 describe(none) -> none;
@@ -199,6 +197,7 @@ validate_credentials_file(Filename) when is_binary(Filename); is_list(Filename) 
             true ->
                 case file:read_file(Filename) of
                     {ok, Contents} -> validate_credentials(Contents);
+                    {error, badarg} -> {error, invalid_credentials_type};
                     {error, Reason} -> {error, {credentials_file, Reason}}
                 end;
             false ->
@@ -210,7 +209,19 @@ validate_credentials_file(_Filename) ->
 
 valid_filename(Filename) when is_binary(Filename) ->
     byte_size(Filename) > 0 andalso binary:match(Filename, <<0>>) =:= nomatch;
-valid_filename(Filename) ->
+valid_filename(Filename) when is_list(Filename) ->
+    case flat_charlist(Filename) of
+        true ->
+            valid_charlist_filename(Filename);
+        false ->
+            false
+    end.
+
+flat_charlist([]) -> true;
+flat_charlist([Codepoint | Rest]) when is_integer(Codepoint) -> flat_charlist(Rest);
+flat_charlist(_) -> false.
+
+valid_charlist_filename(Filename) ->
     try unicode:characters_to_binary(Filename) of
         Path when is_binary(Path) -> valid_filename(Path);
         _ -> false
