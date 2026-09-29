@@ -51,19 +51,7 @@
     | {hpub, binary(), undefined | binary(), [header()], binary()}
     | {sub, binary(), binary(), undefined | binary()}
     | {unsub, binary()}.
--type header_error_value() ::
-    atom()
-    | binary()
-    | integer()
-    | boolean()
-    | [header_error_value()]
-    | {header_error_value(), header_error_value()}
-    | {header_error_value(), header_error_value(), header_error_value()}.
--type header_error() ::
-    {invalid_headers, header_error_value()}
-    | {invalid_header_name, binary()}
-    | {invalid_header_value, binary()}
-    | {invalid_header, header_error_value()}.
+-type header_error() :: {invalid, headers, term()}.
 -export_type([header/0, frame/0, parse_state/0, limits/0, wire_frame/0]).
 
 -spec initial_state() -> parse_state().
@@ -284,18 +272,18 @@ headers_size(Headers) -> byte_size(encode_headers(Headers)).
 validate_headers(Headers) when is_list(Headers) ->
     validate_headers(Headers, ok);
 validate_headers(Headers) ->
-    {error, {invalid_headers, Headers}}.
+    {error, {invalid, headers, {bad_value, Headers}}}.
 
 validate_headers([], Result) ->
     Result;
 validate_headers([{Key, Value} | Rest], ok) when is_binary(Key), is_binary(Value) ->
     case {valid_header_name(Key), binary:match(Value, [<<"\r">>, <<"\n">>])} of
         {true, nomatch} -> validate_headers(Rest, ok);
-        {false, _} -> {error, {invalid_header_name, Key}};
-        {_, _} -> {error, {invalid_header_value, Key}}
+        {false, _} -> {error, {invalid, headers, {invalid_name, Key}}};
+        {_, _} -> {error, {invalid, headers, {invalid_value, Key}}}
     end;
 validate_headers([Header | _], _Result) ->
-    {error, {invalid_header, Header}}.
+    {error, {invalid, headers, {bad_value, Header}}}.
 
 valid_header_name(<<>>) ->
     false;

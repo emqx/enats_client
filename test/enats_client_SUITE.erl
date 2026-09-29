@@ -253,23 +253,23 @@ t_ipv6_connection(_Config) ->
 
 t_invalid_options(_Config) ->
     ?assertEqual(
-        {error, {invalid_option, tls_handshake, typo}},
+        {error, {invalid, tls_handshake, {bad_value, typo}}},
         enats_client:start_link(#{tls => true, tls_handshake => typo})
     ),
     ?assertEqual(
-        {error, {invalid_option, ping_interval, bad}},
+        {error, {invalid, ping_interval, {bad_value, bad}}},
         enats_client:start_link(#{ping_interval => bad})
     ),
     ?assertEqual(
-        {error, {invalid_option, max_pings_out, 0}},
+        {error, {invalid, max_pings_out, {bad_value, 0}}},
         enats_client:start_link(#{max_pings_out => 0})
     ),
     ?assertEqual(
-        {error, {invalid_option, socket_active_n, 32768}},
+        {error, {invalid, socket_active_n, {bad_value, 32768}}},
         enats_client:start_link(#{socket_active_n => 32768})
     ),
     ?assertEqual(
-        {error, {invalid_option, ssl_opts, bad}},
+        {error, {invalid, ssl_opts, {bad_value, bad}}},
         enats_client:start_link(#{ssl_opts => bad})
     ),
     {ok, InvalidTlsClient} = enats_client:start_link(#{
@@ -281,61 +281,67 @@ t_invalid_options(_Config) ->
     ?assertMatch({error, _}, enats_client:connect(InvalidTlsClient, 50)),
     ?assert(is_process_alive(InvalidTlsClient)),
     ok = enats_client:stop(InvalidTlsClient),
-    ?assertEqual({error, {invalid_option, tls, bad}}, enats_client:start_link(#{tls => bad})),
-    ?assertEqual({error, {invalid_option, host, <<>>}}, enats_client:start_link(#{host => <<>>})),
-    ?assertEqual({error, {invalid_option, host, [bad]}}, enats_client:start_link(#{host => [bad]})),
-    ?assertEqual({error, {invalid_option, port, 0}}, enats_client:start_link(#{port => 0})),
-    ?assertEqual({error, {invalid_option, owner, bad}}, enats_client:start_link(#{owner => bad})),
+    ?assertEqual({error, {invalid, tls, {bad_value, bad}}}, enats_client:start_link(#{tls => bad})),
     ?assertEqual(
-        {error, {invalid_option, jitter, 2}},
+        {error, {invalid, host, {bad_value, <<>>}}}, enats_client:start_link(#{host => <<>>})
+    ),
+    ?assertEqual(
+        {error, {invalid, host, {bad_value, [bad]}}}, enats_client:start_link(#{host => [bad]})
+    ),
+    ?assertEqual({error, {invalid, port, {bad_value, 0}}}, enats_client:start_link(#{port => 0})),
+    ?assertEqual(
+        {error, {invalid, owner, {bad_value, bad}}}, enats_client:start_link(#{owner => bad})
+    ),
+    ?assertEqual(
+        {error, {invalid, jitter, {bad_value, 2}}},
         enats_client:start_link(#{reconnect => #{jitter => 2}})
     ),
     ?assertEqual(
-        {error, {invalid_option, multiplier, 0}},
+        {error, {invalid, multiplier, {bad_value, 0}}},
         enats_client:start_link(#{reconnect => #{multiplier => 0}})
     ),
     ?assertEqual(
-        {error, {invalid_option, max_attempts, 0}},
+        {error, {invalid, max_attempts, {bad_value, 0}}},
         enats_client:start_link(#{reconnect => #{max_attempts => 0}})
     ),
     ?assertEqual(
-        {error, {invalid_option, min_delay, bad}},
+        {error, {invalid, min_delay, {bad_value, bad}}},
         enats_client:start_link(#{reconnect => #{min_delay => bad}})
     ),
     ?assertEqual(
-        {error, {invalid_option, reconnect_delay_range, {200, 100}}},
+        {error, {invalid, reconnect_delay_range, {200, 100}}},
         enats_client:start_link(#{reconnect => #{min_delay => 200, max_delay => 100}})
     ),
     ?assertEqual(
-        {error, {invalid_option, max_parser_buffer, 0}},
+        {error, {invalid, max_parser_buffer, {bad_value, 0}}},
         enats_client:start_link(#{max_parser_buffer => 0})
     ),
     ?assertEqual(
-        {error, {invalid_option, max_publish_batch_messages, 0}},
+        {error, {invalid, max_publish_batch_messages, {bad_value, 0}}},
         enats_client:start_link(#{max_publish_batch_messages => 0})
     ),
     ?assertEqual(
-        {error, {invalid_option, max_publish_batch_bytes, 0}},
+        {error, {invalid, max_publish_batch_bytes, {bad_value, 0}}},
         enats_client:start_link(#{max_publish_batch_bytes => 0})
     ).
 
 t_unknown_options(Config) ->
     ?assertEqual(
-        {error, {invalid_option, options, {unknown_keys, [tls_typo]}}},
+        {error, {invalid, options, {unknown_keys, [tls_typo]}}},
         enats_client:start_link(#{tls_typo => true})
     ),
     ?assertEqual(
-        {error, {invalid_option, reconnect, {unknown_keys, [unknown]}}},
+        {error, {invalid, reconnect, {unknown_keys, [unknown]}}},
         enats_client:start_link(#{reconnect => #{unknown => true}})
     ),
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {invalid_option, subscribe, {unknown_keys, [unknown]}}},
+        {error, {invalid, subscribe, {unknown_keys, [unknown]}}},
         enats_client:subscribe(Client, <<"unknown.options">>, #{unknown => true})
     ),
     ?assertEqual(
-        {error, {invalid_option, diagnostics, {unknown_keys, [unknown]}}},
+        {error, {invalid, diagnostics, {unknown_keys, [unknown]}}},
         enats_client:enable_diagnostics(Client, #{unknown => true})
     ),
     ?assertEqual(true, is_process_alive(Client)),
@@ -343,7 +349,7 @@ t_unknown_options(Config) ->
 
 t_invalid_publish_timeout(_Config) ->
     ?assertEqual(
-        {error, {invalid_option, timeout, bad}},
+        {error, {invalid, timeout, {bad_value, bad}}},
         enats_client:publish(
             self(), <<"subject">>, <<"payload">>, #{reply_to => <<"reply">>, timeout => bad}
         )
@@ -364,10 +370,14 @@ t_publish_batch(Config) ->
     ?assertEqual(<<"one">>, receive_batch_payload(Client, 1000)),
     ?assertEqual(<<"two">>, receive_batch_payload(Client, 1000)),
     ok = enats_client:publish_batch(Client, []),
-    ?assertEqual({error, invalid_timeout}, enats_client:publish_batch(Client, [], bad_timeout)),
-    ?assertEqual({error, invalid_options}, enats_client:publish_batch(Client, bad, 1000)),
     ?assertEqual(
-        {error, {batch_too_large, messages, 3, 2}},
+        {error, {invalid, timeout, bad_value}}, enats_client:publish_batch(Client, [], bad_timeout)
+    ),
+    ?assertEqual(
+        {error, {invalid, batch, bad_type}}, enats_client:publish_batch(Client, bad, 1000)
+    ),
+    ?assertEqual(
+        {error, {invalid, batch, {too_large, messages, 3, 2}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>},
             #{subject => <<"batch.test">>, payload => <<"two">>},
@@ -375,7 +385,7 @@ t_publish_batch(Config) ->
         ])
     ),
     ?assertMatch(
-        {error, {batch_too_large, messages, 3, 2}},
+        {error, {invalid, batch, {too_large, messages, 3, 2}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>},
             #{subject => <<"batch.test">>, payload => <<"two">>},
@@ -383,17 +393,17 @@ t_publish_batch(Config) ->
         ])
     ),
     ?assertMatch(
-        {error, {invalid_batch_message, 1, _}},
+        {error, {invalid, batch_message, {1, _}}},
         enats_client:publish_batch(Client, [#{subject => <<"batch.test">>, payload => bad}])
     ),
     ?assertMatch(
-        {error, {invalid_batch_message, 1, _}},
+        {error, {invalid, batch_message, {1, _}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>, unknown => true}
         ])
     ),
     ?assertEqual(
-        {error, {invalid_batch_message, 1, invalid_subject}},
+        {error, {invalid, batch_message, {1, {invalid, subject, bad_value}}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"bad subject">>, payload => <<"one">>}
         ])
@@ -403,17 +413,17 @@ t_publish_batch(Config) ->
     }),
     ok = enats_client:connect(LimitedClient),
     ?assertMatch(
-        {error, {batch_too_large, bytes, _, 1}},
+        {error, {invalid, batch, {too_large, bytes, _, 1}}},
         enats_client:publish_batch(LimitedClient, [
             #{subject => <<"batch.test">>, payload => <<"one">>}
         ])
     ),
     ?assertMatch(
-        {error, {invalid_batch_message, 1, _}},
+        {error, {invalid, batch_message, {1, _}}},
         enats_client:publish_batch(Client, [bad], 1000)
     ),
     ?assertMatch(
-        {error, {invalid_batch_message, 1, _}},
+        {error, {invalid, batch_message, {1, _}}},
         enats_client:publish_batch(
             Client,
             [
@@ -471,7 +481,7 @@ t_publish_batch(Config) ->
     ok = enats_client:stop(InfinityClient).
 
 t_invalid_public_inputs(Config) ->
-    ?assertEqual({error, invalid_options}, enats_client:start_link(not_a_map)),
+    ?assertEqual({error, {invalid, options, bad_type}}, enats_client:start_link(not_a_map)),
     Dead = spawn(fun() -> ok end),
     timer:sleep(1),
     ?assertEqual({error, disconnected}, enats_connection:status(Dead)),
@@ -486,7 +496,9 @@ t_invalid_public_inputs(Config) ->
     ?assertEqual(#{}, enats_client:info(Client)),
     ?assertEqual(disconnected, maps:get(status, enats_client:stats(Client))),
     ?assertEqual({error, diagnostics_disabled}, enats_client:reset_diagnostics(Client)),
-    ?assertEqual({error, invalid_options}, enats_client:enable_diagnostics(Client, bad_options)),
+    ?assertEqual(
+        {error, {invalid, options, bad_type}}, enats_client:enable_diagnostics(Client, bad_options)
+    ),
     ok = enats_client:disable_diagnostics(Client),
     ?assertEqual({error, disconnected}, enats_client:drain(Client, 10)),
     ok = enats_client:connect(Client),
@@ -497,55 +509,63 @@ t_invalid_public_inputs(Config) ->
     Client ! {'DOWN', make_ref(), process, self(), normal},
     timer:sleep(1),
     ?assertEqual(
-        {error, invalid_payload}, enats_client:publish(Client, <<"input.test">>, not_iodata)
+        {error, {invalid, payload, bad_value}},
+        enats_client:publish(Client, <<"input.test">>, not_iodata)
     ),
     ?assertEqual(true, is_process_alive(Client)),
     ?assertEqual(
-        {error, invalid_options},
+        {error, {invalid, options, bad_type}},
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, {invalid_option, msg_id}},
+        {error, {invalid, msg_id, bad_type}},
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, #{msg_id => 42})
     ),
     ?assertEqual(
-        {error, invalid_options}, enats_client:subscribe(Client, <<"input.test">>, not_a_map)
+        {error, {invalid, options, bad_type}},
+        enats_client:subscribe(Client, <<"input.test">>, not_a_map)
     ),
     ?assertEqual(
-        {error, invalid_options},
+        {error, {invalid, options, bad_type}},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, invalid_options},
+        {error, {invalid, options, bad_type}},
         enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, invalid_options}, enats_client:subscribe(Client, <<"input.test">>, #{owner => bad})
+        {error, {invalid, owner, {bad_value, bad}}},
+        enats_client:subscribe(Client, <<"input.test">>, #{owner => bad})
     ),
     ?assertEqual(
-        {error, {invalid_option, headers}},
+        {error, {invalid, headers, bad_type}},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, #{headers => bad})
     ),
     ?assertEqual(
-        {error, {invalid_option, reply_to}},
+        {error, {invalid, reply_to, bad_value}},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, #{reply_to => <<"a b">>})
     ),
-    ?assertEqual({error, invalid_argument}, enats_client:unsubscribe(Client, not_a_reference)),
+    ?assertEqual(
+        {error, {invalid, subscription, bad_type}},
+        enats_client:unsubscribe(Client, not_a_reference)
+    ),
     ?assertEqual(true, is_process_alive(Client)),
-    ?assertEqual({error, invalid_timeout}, enats_client:connect(Client, bad_timeout)),
+    ?assertEqual({error, {invalid, timeout, bad_value}}, enats_client:connect(Client, bad_timeout)),
     ?assertEqual(true, is_process_alive(Client)),
     ?assertEqual(
-        {error, invalid_timeout},
+        {error, {invalid, timeout, bad_value}},
         enats_client:request(Client, <<"input.test">>, <<"p">>, #{}, bad_timeout)
     ),
     ?assertEqual(
-        {error, invalid_options},
+        {error, {invalid, options, bad_type}},
         enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options, 10)
     ),
-    ?assertEqual({error, invalid_timeout}, enats_client:flush(Client, bad_timeout)),
-    ?assertMatch({error, {invalid_option, servers, _}}, enats_client:start_link(#{servers => []})),
+    ?assertEqual({error, {invalid, timeout, bad_value}}, enats_client:flush(Client, bad_timeout)),
+    ?assertMatch(
+        {error, {invalid, servers, {bad_value, _}}}, enats_client:start_link(#{servers => []})
+    ),
     ?assertEqual(
-        {error, {invalid_option, servers, bad}}, enats_client:start_link(#{servers => bad})
+        {error, {invalid, servers, {bad_value, bad}}}, enats_client:start_link(#{servers => bad})
     ),
     ok = enats_client:stop(Client).
 
@@ -553,7 +573,7 @@ t_diagnostics(Config) ->
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
     ?assertEqual(
-        {error, {invalid_option, message_sample_every, 0}},
+        {error, {invalid, message_sample_every, {bad_value, 0}}},
         enats_client:enable_diagnostics(Client, #{message_sample_every => 0})
     ),
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
@@ -645,13 +665,13 @@ t_protocol_input_safety(Config) ->
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {invalid_option, reply_to}},
+        {error, {invalid, reply_to, bad_value}},
         enats_client:publish(Client, <<"safe.test">>, <<"payload">>, #{
             reply_to => <<"reply\r\nPING">>
         })
     ),
     ?assertEqual(
-        {error, {invalid_option, queue_group}},
+        {error, {invalid, queue_group, bad_value}},
         enats_client:subscribe(Client, <<"safe.test">>, #{queue_group => <<"queue\r\nPING">>})
     ),
     ?assertEqual(true, is_process_alive(Client)),
@@ -851,11 +871,11 @@ t_drain_socket_close_no_reconnect(_Config) ->
 
 t_invalid_headers(_Config) ->
     ?assertEqual(
-        {error, {invalid_header_name, <<"bad:name">>}},
+        {error, {invalid, headers, {invalid_name, <<"bad:name">>}}},
         enats_frame:validate_headers([{<<"bad:name">>, <<"value">>}])
     ),
     ?assertEqual(
-        {error, {invalid_header_value, <<"x">>}},
+        {error, {invalid, headers, {invalid_value, <<"x">>}}},
         enats_frame:validate_headers([{<<"x">>, <<"bad\r\nvalue">>}])
     ).
 
@@ -912,21 +932,21 @@ t_server_limits(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {payload_too_large, 3}},
+        {error, {invalid, payload, {too_large, 3}}},
         enats_client:publish(Client, <<"limits">>, <<"1234">>)
     ),
     ?assertEqual(
-        {error, headers_not_supported},
+        {error, {invalid, headers, unsupported}},
         enats_client:publish(Client, <<"limits">>, <<"ok">>, #{headers => [{<<"x">>, <<"y">>}]})
     ),
     ?assertEqual(
-        {error, {invalid_batch_message, 1, headers_not_supported}},
+        {error, {invalid, batch_message, {1, {invalid, headers, unsupported}}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"limits">>, payload => <<"ok">>, headers => [{<<"x">>, <<"y">>}]}
         ])
     ),
     ?assertEqual(
-        {error, {invalid_batch_message, 1, {payload_too_large, 3}}},
+        {error, {invalid, batch_message, {1, {invalid, payload, {too_large, 3}}}}},
         enats_client:publish_batch(Client, [#{subject => <<"limits">>, payload => <<"1234">>}])
     ),
     ok = enats_client:stop(Client),
@@ -1244,12 +1264,14 @@ t_secret_and_subject(_Config) ->
 t_invalid_subject(_Config) ->
     {ok, Client} = enats_client:start_link(#{owner => self()}),
     ?assertEqual(
-        {error, invalid_subject},
+        {error, {invalid, subject, bad_value}},
         enats_client:publish(Client, <<"bad subject">>, <<"payload">>)
     ),
-    ?assertEqual({error, invalid_subject}, enats_client:publish(Client, <<>>, <<"payload">>)),
     ?assertEqual(
-        {error, wildcard_subject_not_allowed},
+        {error, {invalid, subject, bad_value}}, enats_client:publish(Client, <<>>, <<"payload">>)
+    ),
+    ?assertEqual(
+        {error, {invalid, subject, wildcard_not_allowed}},
         enats_client:publish(Client, <<"foo.*">>, <<"payload">>)
     ),
     ok = enats_client:stop(Client).
@@ -1549,11 +1571,11 @@ t_connection_queries(Config) ->
     Info = enats_client:info(Client),
     ?assertEqual(?config(port, Config), maps:get(port, Info)),
     ?assertEqual(
-        {error, invalid_subject},
+        {error, {invalid, subject, bad_value}},
         enats_connection:publish(Client, <<"bad subject">>, <<"payload">>, #{})
     ),
     ?assertEqual(
-        {error, invalid_subject},
+        {error, {invalid, subject, bad_value}},
         enats_client:subscribe(Client, <<"bad subject">>, #{})
     ),
     ?assertEqual(

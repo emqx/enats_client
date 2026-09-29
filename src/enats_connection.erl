@@ -871,7 +871,7 @@ process_connect_info(Info, Base, State) ->
                     connect_failed(waiting_info, {transport, Reason}, State)
             end;
         {error, Reason} ->
-            connect_failed(waiting_info, Reason, State)
+            connect_failed(waiting_info, {invalid, auth, Reason}, State)
     end.
 
 connect_failed(
@@ -983,7 +983,7 @@ safe_ssl_connect(Host, Port, Options, Timeout) ->
     try ssl:connect(Host, Port, Options, Timeout) of
         Result -> Result
     catch
-        error:Reason -> {error, {invalid_ssl_options, Reason}}
+        error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
 
 ssl_result({ok, Socket}) -> {ok, {ssl, Socket}};
@@ -1024,7 +1024,7 @@ safe_ssl_upgrade(Socket, Options, Timeout) ->
     try ssl:connect(Socket, Options, Timeout) of
         Result -> Result
     catch
-        error:Reason -> {error, {invalid_ssl_options, Reason}}
+        error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
 
 send_frame({connect, Params}, #{socket := Socket}) ->
@@ -1072,7 +1072,7 @@ prepare_batch([], _State, _MaxMessages, _MaxBytes, _Index, Count, _Bytes, Acc) -
 prepare_batch(
     _Messages, _State, MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc
 ) when is_integer(MaxMessages), Index > MaxMessages ->
-    {error, {batch_too_large, messages, Index, MaxMessages}};
+    {error, {invalid, batch, {too_large, messages, Index, MaxMessages}}};
 prepare_batch(
     [Message | Rest], State, MaxMessages, MaxBytes, Index, Count, Bytes, Acc
 ) ->
@@ -1095,13 +1095,13 @@ prepare_batch(
                         [WireFrame | Acc]
                     );
                 false ->
-                    {error, {batch_too_large, bytes, NewBytes, MaxBytes}}
+                    {error, {invalid, batch, {too_large, bytes, NewBytes, MaxBytes}}}
             end;
         {error, Reason} ->
-            {error, {invalid_batch_message, Index, Reason}}
+            {error, {invalid, batch_message, {Index, Reason}}}
     end;
 prepare_batch(_Messages, _State, _MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc) ->
-    {error, {invalid_batch_message, Index, invalid_options}}.
+    {error, {invalid, batch_message, {Index, {invalid, options, bad_type}}}}.
 
 prepare_batch_message(Message, State, _Index) when is_map(Message) ->
     case validate_batch_message_keys(Message) of
@@ -1118,18 +1118,18 @@ prepare_batch_message(Message, State, _Index) when is_map(Message) ->
                                 {error, Reason} -> {error, Reason}
                             end
                     catch
-                        error:badarg -> {error, invalid_payload}
+                        error:badarg -> {error, {invalid, payload, bad_value}}
                     end;
                 {error, Reason} ->
                     {error, Reason}
             end;
         ok ->
-            {error, invalid_options};
+            {error, {invalid, options, bad_type}};
         {error, Reason} ->
             {error, Reason}
     end;
 prepare_batch_message(_Message, _State, _Index) ->
-    {error, invalid_options}.
+    {error, {invalid, options, bad_type}}.
 
 validate_batch_message_keys(Message) ->
     UnknownKeys = lists:sort([
@@ -1138,7 +1138,7 @@ validate_batch_message_keys(Message) ->
     ]),
     case UnknownKeys of
         [] -> ok;
-        _ -> {error, {invalid_option, batch_message, {unknown_keys, UnknownKeys}}}
+        _ -> {error, {invalid, batch_message, {unknown_keys, UnknownKeys}}}
     end.
 
 within_batch_limit(_Value, infinity) ->
@@ -1177,7 +1177,7 @@ validate_publish_options(Payload, Options, State) ->
     Headers = maps:get(headers, Options, []),
     case Headers =/= [] andalso maps:get(headers, Info, true) =:= false of
         true ->
-            {error, headers_not_supported};
+            {error, {invalid, headers, unsupported}};
         false ->
             case enats_frame:validate_headers(Headers) of
                 {error, _} = Error ->
@@ -1185,7 +1185,7 @@ validate_publish_options(Payload, Options, State) ->
                 ok ->
                     MessageSize = byte_size(Payload) + enats_frame:headers_size(Headers),
                     case is_integer(MaxPayload) andalso MessageSize > MaxPayload of
-                        true -> {error, {payload_too_large, MaxPayload}};
+                        true -> {error, {invalid, payload, {too_large, MaxPayload}}};
                         false -> ok
                     end
             end
@@ -1468,15 +1468,15 @@ validate_options(Options) when is_map(Options) ->
     case maps:get(tls_handshake, Options, starttls) of
         starttls -> validate_ssl_option_container(Options);
         first -> validate_ssl_option_container(Options);
-        Value -> {error, {invalid_option, tls_handshake, Value}}
+        Value -> {error, {invalid, tls_handshake, {bad_value, Value}}}
     end;
 validate_options(Options) ->
-    {error, {invalid_options, Options}}.
+    {error, {invalid, options, {bad_value, Options}}}.
 
 validate_ssl_option_container(Options) ->
     case maps:get(ssl_opts, Options, []) of
         SslOpts when is_list(SslOpts) -> validate_heartbeat_options(Options);
-        SslOpts -> {error, {invalid_option, ssl_opts, SslOpts}}
+        SslOpts -> {error, {invalid, ssl_opts, {bad_value, SslOpts}}}
     end.
 
 validate_heartbeat_options(Options) ->
@@ -1484,16 +1484,16 @@ validate_heartbeat_options(Options) ->
     MaxPingsOut = maps:get(max_pings_out, Options, 2),
     case is_integer(PingInterval) andalso PingInterval >= 0 of
         false ->
-            {error, {invalid_option, ping_interval, PingInterval}};
+            {error, {invalid, ping_interval, {bad_value, PingInterval}}};
         true ->
             case is_integer(MaxPingsOut) andalso MaxPingsOut > 0 of
                 false ->
-                    {error, {invalid_option, max_pings_out, MaxPingsOut}};
+                    {error, {invalid, max_pings_out, {bad_value, MaxPingsOut}}};
                 true ->
                     ActiveN = maps:get(socket_active_n, Options, 100),
                     case is_integer(ActiveN) andalso ActiveN > 0 andalso ActiveN =< 32767 of
                         true -> validate_parser_limits(Options);
-                        false -> {error, {invalid_option, socket_active_n, ActiveN}}
+                        false -> {error, {invalid, socket_active_n, {bad_value, ActiveN}}}
                     end
             end
     end.
@@ -1511,7 +1511,7 @@ validate_parser_limits(Options) ->
         )
     of
         [] -> ok;
-        [{Name, Value} | _] -> {error, {invalid_option, Name, Value}}
+        [{Name, Value} | _] -> {error, {invalid, Name, {bad_value, Value}}}
     end.
 
 normalize_options(Options) ->
@@ -1724,7 +1724,7 @@ diagnostic_call(From, enable, Options, State) when is_map(Options) ->
             {keep_state, State#{diagnostics => diagnostics_enabled(Options)},
                 reply_action(From, ok)};
         false ->
-            reply(From, {error, {invalid_option, message_sample_every, SampleEvery}})
+            reply(From, {error, {invalid, message_sample_every, {bad_value, SampleEvery}}})
     end;
 diagnostic_call(From, disable, _Options, State) ->
     {keep_state, State#{diagnostics => diagnostics_disabled()}, reply_action(From, ok)};
@@ -1953,11 +1953,11 @@ validate_subject(Subject, AllowWildcard) when is_binary(Subject), byte_size(Subj
     case binary:match(Subject, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>]) of
         nomatch ->
             case {AllowWildcard, binary:match(Subject, [<<"*">>, <<">">>])} of
-                {false, {_, _}} -> {error, wildcard_subject_not_allowed};
+                {false, {_, _}} -> {error, {invalid, subject, wildcard_not_allowed}};
                 _ -> ok
             end;
         _ ->
-            {error, invalid_subject}
+            {error, {invalid, subject, bad_value}}
     end;
 validate_subject(_Subject, _AllowWildcard) ->
-    {error, invalid_subject}.
+    {error, {invalid, subject, bad_value}}.
