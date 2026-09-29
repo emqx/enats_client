@@ -206,6 +206,8 @@ returns `server_error` with `source => jetstream`, `code => unavailable`, and
 `status => 503`. Unknown option names are reported in `details.keys` without
 echoing credential values. When a JetStream PubAck includes `err_code`, its
 numeric value is retained in `details.err_code`.
+TLS handshake alerts report `cause => tls_alert` and the alert atom in
+`details.alert`. Invalid TLS options report `badarg` for `ssl_opts`.
 
 An interrupted flush or request may have reached the server. Such errors
 include `outcome => unknown`; callers choose their own retry and deduplication

@@ -540,20 +540,19 @@ validate_port(Value) -> {error, {invalid, port, {bad_value, Value}}}.
 validate_servers(undefined) ->
     ok;
 validate_servers(Servers) when is_list(Servers), Servers =/= [] ->
-    case
-        lists:all(
-            fun
-                ({Host, Port}) -> validate_host(Host) =:= ok andalso validate_port(Port) =:= ok;
-                (_) -> false
-            end,
-            Servers
-        )
-    of
+    case valid_servers(Servers) of
         true -> ok;
         false -> {error, {invalid, servers, {bad_value, Servers}}}
     end;
 validate_servers(Value) ->
     {error, {invalid, servers, {bad_value, Value}}}.
+
+valid_servers([]) ->
+    true;
+valid_servers([{Host, Port} | Rest]) ->
+    validate_host(Host) =:= ok andalso validate_port(Port) =:= ok andalso valid_servers(Rest);
+valid_servers(_) ->
+    false.
 
 validate_allowed_keys(Scope, Options, AllowedKeys) when is_map(Options) ->
     UnknownKeys = lists:sort([Key || Key <- maps:keys(Options), not lists:member(Key, AllowedKeys)]),

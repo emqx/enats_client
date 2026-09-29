@@ -51,7 +51,9 @@
     code := file:posix() | provider_failed | signer_failed
 }.
 -type connection_cause() :: atom().
--type connection_details() :: #{phase := atom(), cause := connection_cause(), outcome => unknown}.
+-type connection_details() :: #{
+    phase := atom(), cause := connection_cause(), alert => atom(), outcome => unknown
+}.
 -type timeout_details() :: #{phase := atom(), outcome => unknown}.
 -type protocol_details() :: #{
     phase := atom(), code := invalid_frame | invalid_ack | missing_nonce
@@ -96,7 +98,10 @@ normalize(_Operation, {invalid, batch, {too_large, Kind, Actual, Limit}}) ->
         field => batch, code => too_large, metric => Kind, actual => Actual, limit => Limit
     });
 normalize(_Operation, {invalid, Field, {unknown_keys, Keys}}) ->
-    make(badarg, #{field => Field, code => unknown_keys, keys => safe_keys(Keys)});
+    case valid_option_keys(Keys) of
+        true -> make(badarg, #{field => Field, code => unknown_keys, keys => Keys});
+        false -> badarg(Field, bad_type)
+    end;
 normalize(_Operation, {invalid, Field, {too_large, Limit}}) ->
     make(badarg, #{field => Field, code => too_large, limit => Limit});
 normalize(_Operation, {invalid, Field, {bad_value, _Value}}) ->
@@ -133,6 +138,7 @@ normalize(Operation, {disconnected, Cause}) ->
     case Cause of
         {server_error, _} -> normalize(Operation, Cause);
         {protocol, _} -> normalize(Operation, Cause);
+        {transport, _} -> normalize(Operation, Cause);
         _ -> connection(Operation, Cause)
     end;
 normalize(Operation, disconnected) ->
@@ -147,8 +153,18 @@ normalize(Operation, Cause) when
     Cause =:= tls_not_available
 ->
     connection(Operation, Cause);
+normalize(Operation, {tls_alert, {Alert, _Description}}) when is_atom(Alert) ->
+    tls_alert(Operation, Alert);
+normalize(Operation, {transport, {tls_alert, {Alert, _Description}}}) when is_atom(Alert) ->
+    tls_alert(Operation, Alert);
 normalize(Operation, {transport, Cause}) ->
     connection(Operation, Cause);
+normalize(Operation, {tls_upgrade_failed, {invalid, ssl_opts, _} = Cause}) ->
+    normalize(Operation, Cause);
+normalize(Operation, {tls_upgrade_failed, {tls_alert, {Alert, _Description}}}) when
+    is_atom(Alert)
+->
+    tls_alert(Operation, Alert);
 normalize(Operation, {tls_upgrade_failed, _Cause}) ->
     connection(Operation, tls_failed);
 normalize(Operation, timeout) ->
@@ -211,6 +227,13 @@ connection(Operation, Cause) ->
         false -> make(connection_failed, Details)
     end.
 
+tls_alert(Operation, Alert) ->
+    Details = #{phase => Operation, cause => tls_alert, alert => Alert},
+    case outcome_unknown(Operation) of
+        true -> make(connection_failed, Details#{outcome => unknown});
+        false -> make(connection_failed, Details)
+    end.
+
 connection_cause(Cause) when is_atom(Cause) ->
     Cause;
 connection_cause(_) ->
@@ -219,10 +242,12 @@ connection_cause(_) ->
 outcome_unknown(Operation) ->
     lists:member(Operation, [publish, publish_batch, flush, request, jetstream_publish, puback]).
 
-safe_keys(Keys) when is_list(Keys) ->
-    [Key || Key <- Keys, is_atom(Key) orelse is_binary(Key)];
-safe_keys(_) ->
-    [].
+valid_option_keys([]) ->
+    true;
+valid_option_keys([Key | Rest]) when is_atom(Key); is_binary(Key) ->
+    valid_option_keys(Rest);
+valid_option_keys(_) ->
+    false.
 
 status(Code) when is_integer(Code), Code >= 0 -> {ok, Code};
 status(<<A, B, C>>) when A >= $0, A =< $9, B >= $0, B =< $9, C >= $0, C =< $9 ->

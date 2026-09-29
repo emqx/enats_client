@@ -348,9 +348,28 @@ t_error_contract(_Config) ->
     ?assertEqual(
         #{reason => connection_failed, details => #{phase => connect, cause => enetunreach}},
         enats_error:normalize(connect, {transport, enetunreach})
+    ),
+    TlsAlert = {tls_alert, {unknown_ca, "certificate details"}},
+    ExpectedTlsAlert = #{
+        reason => connection_failed,
+        details => #{phase => connect, cause => tls_alert, alert => unknown_ca}
+    },
+    ?assertEqual(ExpectedTlsAlert, enats_error:normalize(connect, TlsAlert)),
+    ?assertEqual(ExpectedTlsAlert, enats_error:normalize(connect, {tls_upgrade_failed, TlsAlert})),
+    ?assertEqual(ExpectedTlsAlert, enats_error:normalize(connect, {transport, TlsAlert})),
+    ?assertEqual(
+        ExpectedTlsAlert#{
+            details => #{
+                phase => request, cause => tls_alert, alert => unknown_ca, outcome => unknown
+            }
+        },
+        enats_error:normalize(request, {disconnected, {transport, TlsAlert}})
     ).
 
 t_unknown_options(Config) ->
+    ?assertEqual(
+        {error, expected_badarg(options, bad_type)}, enats_client:start_link(#{42 => true})
+    ),
     ?assertEqual(
         {error, expected_badarg(options, unknown_keys, #{keys => [tls_typo]})},
         enats_client:start_link(#{tls_typo => true})
@@ -361,6 +380,10 @@ t_unknown_options(Config) ->
     ),
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, expected_badarg(batch_message, bad_type, #{index => 1})},
+        enats_client:publish_batch(Client, [#{subject => <<"s">>, payload => <<"p">>, 42 => true}])
+    ),
     ?assertEqual(
         {error, expected_badarg(subscribe, unknown_keys, #{keys => [unknown]})},
         enats_client:subscribe(Client, <<"unknown.options">>, #{unknown => true})
@@ -508,6 +531,16 @@ t_publish_batch(Config) ->
 
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, expected_badarg(options, bad_type)}, enats_client:start_link(not_a_map)),
+    ?assertEqual(
+        {error, expected_badarg(servers, bad_value)},
+        enats_client:start_link(#{servers => [{"127.0.0.1", 4222} | bad]})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(headers, bad_type)},
+        enats_client:publish(self(), <<"subject">>, <<"payload">>, #{
+            headers => [{<<"K">>, <<"V">>} | bad]
+        })
+    ),
     ?assertEqual({error, expected_badarg(client, bad_type)}, enats_client:status(42)),
     ?assertEqual({error, expected_badarg(client, bad_type)}, enats_client:stop(42)),
     Dead = spawn(fun() -> ok end),
@@ -1667,6 +1700,17 @@ verify_peer_tls_case(Port, CaFile, CertFile) ->
     ok.
 
 t_connection_errors(_Config) ->
+    {ok, TlsClient} = enats_client:start_link(#{
+        host => "127.0.0.1",
+        port => 1,
+        tls => true,
+        tls_handshake => first,
+        ssl_opts => [{bad_option, true}]
+    }),
+    ?assertEqual(
+        {error, expected_badarg(ssl_opts, bad_value)}, enats_client:connect(TlsClient)
+    ),
+    ok = enats_client:stop(TlsClient),
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => 1, owner => self()}),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ?assertEqual(#{}, enats_client:info(Client)),

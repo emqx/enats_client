@@ -286,7 +286,9 @@ validate_headers([{Key, Value} | Rest], ok) when is_binary(Key), is_binary(Value
         {_, _} -> {error, {invalid, headers, {invalid_value, Key}}}
     end;
 validate_headers([Header | _], _Result) ->
-    {error, {invalid, headers, {bad_value, Header}}}.
+    {error, {invalid, headers, {bad_value, Header}}};
+validate_headers(_Tail, _Result) ->
+    {error, {invalid, headers, bad_type}}.
 
 valid_header_name(<<>>) ->
     false;

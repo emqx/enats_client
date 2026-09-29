@@ -987,10 +987,15 @@ open_transport(Host, Port, #{socket_active_n := ActiveN}, Timeout) ->
 
 safe_ssl_connect(Host, Port, Options, Timeout) ->
     try ssl:connect(Host, Port, Options, Timeout) of
-        Result -> Result
+        Result -> classify_ssl_result(Result)
     catch
         error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
+
+classify_ssl_result({error, {options, _Reason}}) ->
+    {error, {invalid, ssl_opts, bad_value}};
+classify_ssl_result(Result) ->
+    Result.
 
 ssl_result({ok, Socket}) -> {ok, {ssl, Socket}};
 ssl_result(Error) -> Error.
@@ -1028,7 +1033,7 @@ maybe_upgrade_tls(Info, #{options := Options} = State) ->
 
 safe_ssl_upgrade(Socket, Options, Timeout) ->
     try ssl:connect(Socket, Options, Timeout) of
-        Result -> Result
+        Result -> classify_ssl_result(Result)
     catch
         error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
