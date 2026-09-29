@@ -56,9 +56,10 @@
     {keep_state, state(), [action()]}
     | {next_state, atom(), state(), [action()]}
     | {keep_state_and_data, action()}.
--type error_result() :: ok | {error, enats_client:error_reason()}.
+-type raw_error_reason() :: atom() | tuple() | enats_error:error().
+-type error_result() :: ok | {error, raw_error_reason()}.
 
--spec start_link(enats_client:options()) -> {ok, pid()} | {error, enats_client:error_reason()}.
+-spec start_link(enats_client:options()) -> {ok, pid()} | {error, raw_error_reason()}.
 
 start_link(Options) ->
     case validate_options(Options) of
@@ -80,11 +81,11 @@ stop(Pid) ->
         exit:{noproc, _} -> ok;
         exit:Reason -> {error, {client_exit, Reason}}
     end.
--spec status(pid()) -> enats_client:status() | {error, enats_client:error_reason()}.
+-spec status(pid()) -> enats_client:status() | {error, raw_error_reason()}.
 status(Pid) -> safe_call(Pid, status, ?TIMEOUT).
--spec info(pid()) -> enats_client:server_info() | {error, enats_client:error_reason()}.
+-spec info(pid()) -> enats_client:server_info() | {error, raw_error_reason()}.
 info(Pid) -> safe_call(Pid, info, ?TIMEOUT).
--spec stats(pid()) -> enats_client:stats() | {error, enats_client:error_reason()}.
+-spec stats(pid()) -> enats_client:stats() | {error, raw_error_reason()}.
 stats(Pid) -> safe_call(Pid, stats, ?TIMEOUT).
 -spec publish(
     pid(), binary(), binary(), enats_client:publish_options()
@@ -99,11 +100,11 @@ publish(Pid, Subject, Payload, Options) ->
 publish_batch(Pid, Messages, Timeout) ->
     safe_call(Pid, {publish_batch, Messages}, Timeout).
 -spec request(pid(), binary(), binary(), enats_client:connection_request_options()) ->
-    {ok, enats_client:message()} | {error, enats_client:error_reason()}.
+    {ok, enats_client:message()} | {error, raw_error_reason()}.
 request(Pid, Subject, Payload, Options) ->
     safe_call(Pid, {request, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
 -spec subscribe(pid(), binary(), enats_client:subscribe_options()) ->
-    {ok, reference()} | {error, enats_client:error_reason()}.
+    {ok, reference()} | {error, raw_error_reason()}.
 subscribe(Pid, Subject, Options) -> safe_call(Pid, {subscribe, Subject, Options}, ?TIMEOUT).
 -spec unsubscribe(pid(), reference()) -> error_result().
 unsubscribe(Pid, Ref) -> safe_call(Pid, {unsubscribe, Ref}, ?TIMEOUT).
@@ -116,7 +117,7 @@ enable_diagnostics(Pid, Options) -> safe_call(Pid, {enable_diagnostics, Options}
 -spec disable_diagnostics(pid()) -> error_result().
 disable_diagnostics(Pid) -> safe_call(Pid, disable_diagnostics, ?TIMEOUT).
 -spec diagnostics(pid()) ->
-    {ok, enats_client:diagnostics_snapshot()} | {error, enats_client:error_reason()}.
+    {ok, enats_client:diagnostics_snapshot()} | {error, raw_error_reason()}.
 diagnostics(Pid) -> safe_call(Pid, diagnostics, ?TIMEOUT).
 -spec reset_diagnostics(pid()) -> error_result().
 reset_diagnostics(Pid) -> safe_call(Pid, reset_diagnostics, ?TIMEOUT).
@@ -1351,14 +1352,17 @@ maybe_unsubscribe(Sid, State) ->
     ok.
 
 drain_failed(Reason, State) ->
-    close(State),
-    reply_flushes(State, {error, {disconnected, Reason}}),
-    reply_requests(State, {error, {disconnected, Reason}}),
-    notify(State, disconnected, Reason),
-    {next_state, disconnected, clear_socket(clear_subscriptions(State)), []}.
+    State1 = State#{last_error => enats_error:normalize(drain, Reason)},
+    close(State1),
+    reply_flushes(State1, {error, {disconnected, Reason}}),
+    reply_requests(State1, {error, {disconnected, Reason}}),
+    notify(State1, disconnected, Reason),
+    {next_state, disconnected, clear_socket(clear_subscriptions(State1)), []}.
 
 lost(_StateName, Reason, State) ->
-    State0 = record_counter(error_counter(Reason), State#{last_error => Reason}),
+    State0 = record_counter(error_counter(Reason), State#{
+        last_error => enats_error:normalize(connection, Reason)
+    }),
     close(State0),
     reply_connect(State0, {error, Reason}),
     reply_flushes(State0, {error, {disconnected, Reason}}),
@@ -1413,9 +1417,14 @@ cancel_request_timer(Timer) ->
 notify(State, Event, Data) ->
     Options = maps:get(options, State),
     case maps:get(notify, Options, true) of
-        true -> maps:get(owner, Options) ! {enats_client, self(), Event, Data};
+        true -> maps:get(owner, Options) ! {enats_client, self(), Event, event_data(Event, Data)};
         false -> ok
     end.
+
+event_data(disconnected, requested) -> requested;
+event_data(disconnected, Reason) -> enats_error:normalize(connection, Reason);
+event_data(reconnect_exhausted, Reason) -> enats_error:normalize(connect, Reason);
+event_data(_Event, Data) -> Data.
 reply(From, Value) -> {keep_state_and_data, {reply, From, Value}}.
 reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.

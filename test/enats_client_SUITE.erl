@@ -25,6 +25,7 @@
     t_invalid_subject/1,
     t_lazy_secret/1,
     t_invalid_options/1,
+    t_error_contract/1,
     t_unknown_options/1,
     t_invalid_publish_timeout/1,
     t_publish_batch/1,
@@ -97,6 +98,7 @@ all() ->
         t_invalid_subject,
         t_lazy_secret,
         t_invalid_options,
+        t_error_contract,
         t_unknown_options,
         t_invalid_publish_timeout,
         t_publish_batch,
@@ -253,23 +255,23 @@ t_ipv6_connection(_Config) ->
 
 t_invalid_options(_Config) ->
     ?assertEqual(
-        {error, {invalid, tls_handshake, {bad_value, typo}}},
+        {error, expected_badarg(tls_handshake, bad_value)},
         enats_client:start_link(#{tls => true, tls_handshake => typo})
     ),
     ?assertEqual(
-        {error, {invalid, ping_interval, {bad_value, bad}}},
+        {error, expected_badarg(ping_interval, bad_value)},
         enats_client:start_link(#{ping_interval => bad})
     ),
     ?assertEqual(
-        {error, {invalid, max_pings_out, {bad_value, 0}}},
+        {error, expected_badarg(max_pings_out, bad_value)},
         enats_client:start_link(#{max_pings_out => 0})
     ),
     ?assertEqual(
-        {error, {invalid, socket_active_n, {bad_value, 32768}}},
+        {error, expected_badarg(socket_active_n, bad_value)},
         enats_client:start_link(#{socket_active_n => 32768})
     ),
     ?assertEqual(
-        {error, {invalid, ssl_opts, {bad_value, bad}}},
+        {error, expected_badarg(ssl_opts, bad_value)},
         enats_client:start_link(#{ssl_opts => bad})
     ),
     {ok, InvalidTlsClient} = enats_client:start_link(#{
@@ -281,67 +283,86 @@ t_invalid_options(_Config) ->
     ?assertMatch({error, _}, enats_client:connect(InvalidTlsClient, 50)),
     ?assert(is_process_alive(InvalidTlsClient)),
     ok = enats_client:stop(InvalidTlsClient),
-    ?assertEqual({error, {invalid, tls, {bad_value, bad}}}, enats_client:start_link(#{tls => bad})),
+    ?assertEqual({error, expected_badarg(tls, bad_value)}, enats_client:start_link(#{tls => bad})),
     ?assertEqual(
-        {error, {invalid, host, {bad_value, <<>>}}}, enats_client:start_link(#{host => <<>>})
+        {error, expected_badarg(host, bad_value)}, enats_client:start_link(#{host => <<>>})
     ),
     ?assertEqual(
-        {error, {invalid, host, {bad_value, [bad]}}}, enats_client:start_link(#{host => [bad]})
+        {error, expected_badarg(host, bad_value)}, enats_client:start_link(#{host => [bad]})
     ),
-    ?assertEqual({error, {invalid, port, {bad_value, 0}}}, enats_client:start_link(#{port => 0})),
+    ?assertEqual({error, expected_badarg(port, bad_value)}, enats_client:start_link(#{port => 0})),
     ?assertEqual(
-        {error, {invalid, owner, {bad_value, bad}}}, enats_client:start_link(#{owner => bad})
+        {error, expected_badarg(owner, bad_value)}, enats_client:start_link(#{owner => bad})
     ),
     ?assertEqual(
-        {error, {invalid, jitter, {bad_value, 2}}},
+        {error, expected_badarg(jitter, bad_value)},
         enats_client:start_link(#{reconnect => #{jitter => 2}})
     ),
     ?assertEqual(
-        {error, {invalid, multiplier, {bad_value, 0}}},
+        {error, expected_badarg(multiplier, bad_value)},
         enats_client:start_link(#{reconnect => #{multiplier => 0}})
     ),
     ?assertEqual(
-        {error, {invalid, max_attempts, {bad_value, 0}}},
+        {error, expected_badarg(max_attempts, bad_value)},
         enats_client:start_link(#{reconnect => #{max_attempts => 0}})
     ),
     ?assertEqual(
-        {error, {invalid, min_delay, {bad_value, bad}}},
+        {error, expected_badarg(min_delay, bad_value)},
         enats_client:start_link(#{reconnect => #{min_delay => bad}})
     ),
     ?assertEqual(
-        {error, {invalid, reconnect_delay_range, {200, 100}}},
+        {error, expected_badarg(reconnect_delay_range, bad_value)},
         enats_client:start_link(#{reconnect => #{min_delay => 200, max_delay => 100}})
     ),
     ?assertEqual(
-        {error, {invalid, max_parser_buffer, {bad_value, 0}}},
+        {error, expected_badarg(max_parser_buffer, bad_value)},
         enats_client:start_link(#{max_parser_buffer => 0})
     ),
     ?assertEqual(
-        {error, {invalid, max_publish_batch_messages, {bad_value, 0}}},
+        {error, expected_badarg(max_publish_batch_messages, bad_value)},
         enats_client:start_link(#{max_publish_batch_messages => 0})
     ),
     ?assertEqual(
-        {error, {invalid, max_publish_batch_bytes, {bad_value, 0}}},
+        {error, expected_badarg(max_publish_batch_bytes, bad_value)},
         enats_client:start_link(#{max_publish_batch_bytes => 0})
+    ).
+
+t_error_contract(_Config) ->
+    Secret = <<"private-credential">>,
+    BadArg = enats_error:normalize(start, {invalid, auth, {bad_value, Secret}}),
+    ?assertEqual(expected_badarg(auth, bad_value), BadArg),
+    ?assertEqual(nomatch, binary:match(term_to_binary(BadArg), Secret)),
+    ?assertEqual({error, expected_badarg(nkey_seed, bad_type)}, enats_auth:from_seed(42)),
+    ?assertEqual(
+        #{reason => internal_error, details => #{operation => publish, code => client_exit}},
+        enats_error:normalize(publish, {client_exit, simulated_exit})
+    ),
+    ?assertEqual(
+        #{reason => protocol_error, details => #{phase => puback, code => invalid_ack}},
+        enats_error:normalize(jetstream_publish, {jetstream, rejected, <<"bad-status">>})
+    ),
+    ?assertEqual(
+        #{reason => timeout, details => #{phase => flush, outcome => unknown}},
+        enats_error:normalize(flush, timeout)
     ).
 
 t_unknown_options(Config) ->
     ?assertEqual(
-        {error, {invalid, options, {unknown_keys, [tls_typo]}}},
+        {error, expected_badarg(options, unknown_keys, #{keys => [tls_typo]})},
         enats_client:start_link(#{tls_typo => true})
     ),
     ?assertEqual(
-        {error, {invalid, reconnect, {unknown_keys, [unknown]}}},
+        {error, expected_badarg(reconnect, unknown_keys, #{keys => [unknown]})},
         enats_client:start_link(#{reconnect => #{unknown => true}})
     ),
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {invalid, subscribe, {unknown_keys, [unknown]}}},
+        {error, expected_badarg(subscribe, unknown_keys, #{keys => [unknown]})},
         enats_client:subscribe(Client, <<"unknown.options">>, #{unknown => true})
     ),
     ?assertEqual(
-        {error, {invalid, diagnostics, {unknown_keys, [unknown]}}},
+        {error, expected_badarg(diagnostics, unknown_keys, #{keys => [unknown]})},
         enats_client:enable_diagnostics(Client, #{unknown => true})
     ),
     ?assertEqual(true, is_process_alive(Client)),
@@ -349,7 +370,7 @@ t_unknown_options(Config) ->
 
 t_invalid_publish_timeout(_Config) ->
     ?assertEqual(
-        {error, {invalid, timeout, {bad_value, bad}}},
+        {error, expected_badarg(timeout, bad_value)},
         enats_client:publish(
             self(), <<"subject">>, <<"payload">>, #{reply_to => <<"reply">>, timeout => bad}
         )
@@ -371,21 +392,22 @@ t_publish_batch(Config) ->
     ?assertEqual(<<"two">>, receive_batch_payload(Client, 1000)),
     ok = enats_client:publish_batch(Client, []),
     ?assertEqual(
-        {error, {invalid, timeout, bad_value}}, enats_client:publish_batch(Client, [], bad_timeout)
+        {error, expected_badarg(timeout, bad_value)},
+        enats_client:publish_batch(Client, [], bad_timeout)
     ),
     ?assertEqual(
-        {error, {invalid, batch, bad_type}}, enats_client:publish_batch(Client, bad, 1000)
+        {error, expected_badarg(batch, bad_type)}, enats_client:publish_batch(Client, bad, 1000)
     ),
     ?assertEqual(
-        {error, {invalid, batch, {too_large, messages, 3, 2}}},
+        {error, expected_badarg(batch, too_large, #{metric => messages, actual => 3, limit => 2})},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>},
             #{subject => <<"batch.test">>, payload => <<"two">>},
             #{subject => <<"batch.test">>, payload => <<"three">>}
         ])
     ),
-    ?assertMatch(
-        {error, {invalid, batch, {too_large, messages, 3, 2}}},
+    ?assertEqual(
+        {error, expected_badarg(batch, too_large, #{metric => messages, actual => 3, limit => 2})},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>},
             #{subject => <<"batch.test">>, payload => <<"two">>},
@@ -393,17 +415,17 @@ t_publish_batch(Config) ->
         ])
     ),
     ?assertMatch(
-        {error, {invalid, batch_message, {1, _}}},
+        {error, #{reason := badarg, details := #{index := 1}}},
         enats_client:publish_batch(Client, [#{subject => <<"batch.test">>, payload => bad}])
     ),
     ?assertMatch(
-        {error, {invalid, batch_message, {1, _}}},
+        {error, #{reason := badarg, details := #{index := 1}}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>, unknown => true}
         ])
     ),
     ?assertEqual(
-        {error, {invalid, batch_message, {1, {invalid, subject, bad_value}}}},
+        {error, expected_badarg(subject, bad_value, #{index => 1})},
         enats_client:publish_batch(Client, [
             #{subject => <<"bad subject">>, payload => <<"one">>}
         ])
@@ -413,17 +435,17 @@ t_publish_batch(Config) ->
     }),
     ok = enats_client:connect(LimitedClient),
     ?assertMatch(
-        {error, {invalid, batch, {too_large, bytes, _, 1}}},
+        {error, #{reason := badarg, details := #{field := batch, code := too_large, limit := 1}}},
         enats_client:publish_batch(LimitedClient, [
             #{subject => <<"batch.test">>, payload => <<"one">>}
         ])
     ),
     ?assertMatch(
-        {error, {invalid, batch_message, {1, _}}},
+        {error, #{reason := badarg, details := #{index := 1}}},
         enats_client:publish_batch(Client, [bad], 1000)
     ),
     ?assertMatch(
-        {error, {invalid, batch_message, {1, _}}},
+        {error, #{reason := badarg, details := #{index := 1}}},
         enats_client:publish_batch(
             Client,
             [
@@ -481,7 +503,7 @@ t_publish_batch(Config) ->
     ok = enats_client:stop(InfinityClient).
 
 t_invalid_public_inputs(Config) ->
-    ?assertEqual({error, {invalid, options, bad_type}}, enats_client:start_link(not_a_map)),
+    ?assertEqual({error, expected_badarg(options, bad_type)}, enats_client:start_link(not_a_map)),
     Dead = spawn(fun() -> ok end),
     timer:sleep(1),
     ?assertEqual({error, disconnected}, enats_connection:status(Dead)),
@@ -495,85 +517,101 @@ t_invalid_public_inputs(Config) ->
     timer:sleep(1),
     ?assertEqual(#{}, enats_client:info(Client)),
     ?assertEqual(disconnected, maps:get(status, enats_client:stats(Client))),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:reset_diagnostics(Client)),
     ?assertEqual(
-        {error, {invalid, options, bad_type}}, enats_client:enable_diagnostics(Client, bad_options)
+        expected_error(bad_operation, #{
+            operation => reset_diagnostics, code => diagnostics_disabled
+        }),
+        enats_client:reset_diagnostics(Client)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(options, bad_type)},
+        enats_client:enable_diagnostics(Client, bad_options)
     ),
     ok = enats_client:disable_diagnostics(Client),
-    ?assertEqual({error, disconnected}, enats_client:drain(Client, 10)),
+    ?assertEqual(expected_connection(drain, disconnected), enats_client:drain(Client, 10)),
     ok = enats_client:connect(Client),
     ?assertEqual(connected, enats_client:status(Client)),
     ?assertEqual(connected, maps:get(status, enats_client:stats(Client))),
     Client ! unexpected_connected_event,
-    ?assertEqual({error, already_connected}, enats_client:connect(Client, 10)),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => connect, code => already_connected}),
+        enats_client:connect(Client, 10)
+    ),
     Client ! {'DOWN', make_ref(), process, self(), normal},
     timer:sleep(1),
     ?assertEqual(
-        {error, {invalid, payload, bad_value}},
+        {error, expected_badarg(payload, bad_value)},
         enats_client:publish(Client, <<"input.test">>, not_iodata)
     ),
     ?assertEqual(true, is_process_alive(Client)),
     ?assertEqual(
-        {error, {invalid, options, bad_type}},
+        {error, expected_badarg(options, bad_type)},
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, {invalid, msg_id, bad_type}},
+        {error, expected_badarg(msg_id, bad_type)},
         enats_client:jetstream_publish(Client, <<"input.test">>, <<"p">>, #{msg_id => 42})
     ),
     ?assertEqual(
-        {error, {invalid, options, bad_type}},
+        {error, expected_badarg(options, bad_type)},
         enats_client:subscribe(Client, <<"input.test">>, not_a_map)
     ),
     ?assertEqual(
-        {error, {invalid, options, bad_type}},
+        {error, expected_badarg(options, bad_type)},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, {invalid, options, bad_type}},
+        {error, expected_badarg(options, bad_type)},
         enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options)
     ),
     ?assertEqual(
-        {error, {invalid, owner, {bad_value, bad}}},
+        {error, expected_badarg(owner, bad_value)},
         enats_client:subscribe(Client, <<"input.test">>, #{owner => bad})
     ),
     ?assertEqual(
-        {error, {invalid, headers, bad_type}},
+        {error, expected_badarg(headers, bad_type)},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, #{headers => bad})
     ),
     ?assertEqual(
-        {error, {invalid, reply_to, bad_value}},
+        {error, expected_badarg(reply_to, bad_value)},
         enats_client:publish(Client, <<"input.test">>, <<"p">>, #{reply_to => <<"a b">>})
     ),
     ?assertEqual(
-        {error, {invalid, subscription, bad_type}},
+        {error, expected_badarg(subscription, bad_type)},
         enats_client:unsubscribe(Client, not_a_reference)
     ),
     ?assertEqual(true, is_process_alive(Client)),
-    ?assertEqual({error, {invalid, timeout, bad_value}}, enats_client:connect(Client, bad_timeout)),
+    ?assertEqual(
+        {error, expected_badarg(timeout, bad_value)}, enats_client:connect(Client, bad_timeout)
+    ),
     ?assertEqual(true, is_process_alive(Client)),
     ?assertEqual(
-        {error, {invalid, timeout, bad_value}},
+        {error, expected_badarg(timeout, bad_value)},
         enats_client:request(Client, <<"input.test">>, <<"p">>, #{}, bad_timeout)
     ),
     ?assertEqual(
-        {error, {invalid, options, bad_type}},
+        {error, expected_badarg(options, bad_type)},
         enats_client:request(Client, <<"input.test">>, <<"p">>, bad_options, 10)
     ),
-    ?assertEqual({error, {invalid, timeout, bad_value}}, enats_client:flush(Client, bad_timeout)),
-    ?assertMatch(
-        {error, {invalid, servers, {bad_value, _}}}, enats_client:start_link(#{servers => []})
+    ?assertEqual(
+        {error, expected_badarg(timeout, bad_value)}, enats_client:flush(Client, bad_timeout)
     ),
     ?assertEqual(
-        {error, {invalid, servers, {bad_value, bad}}}, enats_client:start_link(#{servers => bad})
+        {error, expected_badarg(servers, bad_value)}, enats_client:start_link(#{servers => []})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(servers, bad_value)}, enats_client:start_link(#{servers => bad})
     ),
     ok = enats_client:stop(Client).
 
 t_diagnostics(Config) ->
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
     ?assertEqual(
-        {error, {invalid, message_sample_every, {bad_value, 0}}},
+        expected_error(bad_operation, #{operation => diagnostics, code => diagnostics_disabled}),
+        enats_client:diagnostics(Client)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(message_sample_every, bad_value)},
         enats_client:enable_diagnostics(Client, #{message_sample_every => 0})
     ),
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
@@ -615,7 +653,10 @@ t_diagnostics(Config) ->
     {ok, UnsampledSnapshot} = enats_client:diagnostics(Client),
     ?assertEqual(false, maps:is_key(delivery_latency, maps:get(latencies, UnsampledSnapshot))),
     ok = enats_client:disable_diagnostics(Client),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => diagnostics, code => diagnostics_disabled}),
+        enats_client:diagnostics(Client)
+    ),
     ok = enats_client:stop(Client).
 
 t_drain(Config) ->
@@ -624,7 +665,10 @@ t_drain(Config) ->
     {ok, Subscription} = enats_client:subscribe(Client, <<"drain.test">>, #{}),
     ok = enats_client:drain(Client, 1000),
     ?assertEqual(disconnected, enats_client:status(Client)),
-    ?assertEqual({error, disconnected}, enats_client:unsubscribe(Client, Subscription)).
+    ?assertEqual(
+        expected_connection(unsubscribe, disconnected),
+        enats_client:unsubscribe(Client, Subscription)
+    ).
 
 t_parser_limits(_Config) ->
     LongLine = binary:copy(<<"x">>, 4097),
@@ -665,13 +709,13 @@ t_protocol_input_safety(Config) ->
     {ok, Client} = enats_client:start_link(#{port => ?config(port, Config), owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {invalid, reply_to, bad_value}},
+        {error, expected_badarg(reply_to, bad_value)},
         enats_client:publish(Client, <<"safe.test">>, <<"payload">>, #{
             reply_to => <<"reply\r\nPING">>
         })
     ),
     ?assertEqual(
-        {error, {invalid, queue_group, bad_value}},
+        {error, expected_badarg(queue_group, bad_value)},
         enats_client:subscribe(Client, <<"safe.test">>, #{queue_group => <<"queue\r\nPING">>})
     ),
     ?assertEqual(true, is_process_alive(Client)),
@@ -799,7 +843,12 @@ t_drain_pending_request(_Config) ->
     receive
         {fake_drain_started, Server} ->
             ?assertEqual(draining, maps:get(status, enats_client:stats(Client))),
-            ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(Client)),
+            ?assertEqual(
+                expected_error(bad_operation, #{
+                    operation => diagnostics, code => diagnostics_disabled
+                }),
+                enats_client:diagnostics(Client)
+            ),
             Client ! unexpected_draining_event,
             Client ! {'DOWN', make_ref(), process, self(), normal},
             timer:sleep(1),
@@ -837,11 +886,12 @@ t_drain_pending_request_timeout(_Config) ->
     after 1000 -> ct:fail(drain_not_started)
     end,
     receive
-        {request_timeout_result, {error, timeout}} -> ok
+        {request_timeout_result, {error, #{reason := timeout, details := #{phase := request}}}} ->
+            ok
     after 1000 -> ct:fail(request_not_cancelled)
     end,
     receive
-        {drain_timeout_result, {error, timeout}} -> ok
+        {drain_timeout_result, {error, #{reason := timeout, details := #{phase := drain}}}} -> ok
     after 1000 -> ct:fail(drain_timeout_not_returned)
     end,
     ?assertEqual(disconnected, enats_client:status(Client)),
@@ -860,10 +910,16 @@ t_drain_socket_close_no_reconnect(_Config) ->
     Parent = self(),
     spawn(fun() -> Parent ! {drain_close_result, enats_client:drain(Client, 1000)} end),
     receive
-        {drain_close_result, {error, {disconnected, closed}}} -> ok
+        {drain_close_result,
+            {error, #{reason := connection_failed, details := #{cause := closed}}}} ->
+            ok
     after 1000 -> ct:fail(drain_close_not_returned)
     end,
     ?assertEqual(disconnected, enats_client:status(Client)),
+    ?assertEqual(
+        #{reason => connection_failed, details => #{phase => drain, cause => closed}},
+        maps:get(last_error, enats_client:stats(Client))
+    ),
     timer:sleep(50),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
@@ -871,11 +927,11 @@ t_drain_socket_close_no_reconnect(_Config) ->
 
 t_invalid_headers(_Config) ->
     ?assertEqual(
-        {error, {invalid, headers, {invalid_name, <<"bad:name">>}}},
+        {error, expected_badarg(headers, invalid_name)},
         enats_frame:validate_headers([{<<"bad:name">>, <<"value">>}])
     ),
     ?assertEqual(
-        {error, {invalid, headers, {invalid_value, <<"x">>}}},
+        {error, expected_badarg(headers, invalid_value)},
         enats_frame:validate_headers([{<<"x">>, <<"bad\r\nvalue">>}])
     ).
 
@@ -916,7 +972,10 @@ t_connect_idempotence(Config) ->
         host => "127.0.0.1", port => ?config(port, Config), owner => self()
     }),
     ok = enats_client:connect(Client),
-    ?assertEqual({error, already_connected}, enats_client:connect(Client)),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => connect, code => already_connected}),
+        enats_client:connect(Client)
+    ),
     ok = enats_client:stop(Client).
 
 t_coalesced_flush(_Config) ->
@@ -932,21 +991,21 @@ t_server_limits(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {invalid, payload, {too_large, 3}}},
+        {error, expected_badarg(payload, too_large, #{limit => 3})},
         enats_client:publish(Client, <<"limits">>, <<"1234">>)
     ),
     ?assertEqual(
-        {error, {invalid, headers, unsupported}},
+        {error, expected_badarg(headers, unsupported)},
         enats_client:publish(Client, <<"limits">>, <<"ok">>, #{headers => [{<<"x">>, <<"y">>}]})
     ),
     ?assertEqual(
-        {error, {invalid, batch_message, {1, {invalid, headers, unsupported}}}},
+        {error, expected_badarg(headers, unsupported, #{index => 1})},
         enats_client:publish_batch(Client, [
             #{subject => <<"limits">>, payload => <<"ok">>, headers => [{<<"x">>, <<"y">>}]}
         ])
     ),
     ?assertEqual(
-        {error, {invalid, batch_message, {1, {invalid, payload, {too_large, 3}}}}},
+        {error, expected_badarg(payload, too_large, #{index => 1, limit => 3})},
         enats_client:publish_batch(Client, [#{subject => <<"limits">>, payload => <<"1234">>}])
     ),
     ok = enats_client:stop(Client),
@@ -995,7 +1054,7 @@ t_flush_timeout_preserves_pong_order(_Config) ->
     after 1000 -> ct:fail(first_flush_not_received)
     end,
     receive
-        {first_flush, {error, timeout}} -> ok
+        {first_flush, {error, #{reason := timeout, details := #{phase := flush}}}} -> ok
     after 1000 -> ct:fail(first_flush_did_not_time_out)
     end,
     spawn(fun() -> Parent ! {second_flush, enats_client:flush(Client, 10000)} end),
@@ -1035,8 +1094,8 @@ t_flush_disconnects_all_waiters(_Config) ->
     end,
     ?assertEqual(
         lists:sort([
-            {first_flush, {error, {disconnected, closed}}},
-            {second_flush, {error, {disconnected, closed}}}
+            {first_flush, expected_connection_unknown(flush, closed)},
+            {second_flush, expected_connection_unknown(flush, closed)}
         ]),
         lists:sort(receive_flush_results(2, []))
     ),
@@ -1131,8 +1190,10 @@ t_frame_variants(_Config) ->
 t_auth_helpers(_Config) ->
     {ok, #{}} = enats_auth:connect_params(none, #{}, #{}),
     ?assertEqual(ok, enats_auth:validate(none)),
-    ?assertEqual({error, invalid_credentials}, enats_auth:validate(#{})),
-    ?assertEqual({error, invalid_secret_type}, enats_auth:resolve_secret(42)),
+    ?assertEqual(
+        {error, expected_badarg(authentication, invalid_credentials)}, enats_auth:validate(#{})
+    ),
+    ?assertEqual({error, expected_badarg(authentication, bad_type)}, enats_auth:resolve_secret(42)),
     ?assertEqual(none, enats_auth:describe(none)),
     ?assertEqual(user_password, enats_auth:describe(#{mechanism => user_password})),
     {ok, UserParams} = enats_auth:connect_params(
@@ -1151,13 +1212,13 @@ t_auth_helpers(_Config) ->
     ),
     ?assertEqual(<<"token">>, maps:get(auth_token, TokenParams)),
     ?assertEqual(
-        {error, invalid_secret_type},
+        {error, expected_badarg(authentication, bad_type)},
         enats_auth:connect_params(
             #{mechanism => token, token => 42}, #{}, #{}
         )
     ),
     ?assertEqual(
-        {error, nkey_nonce_missing},
+        expected_error(protocol_error, #{phase => authentication, code => missing_nonce}),
         enats_auth:connect_params(
             #{mechanism => nkey, public_key => <<"key">>, sign_fun => (fun(_) -> <<"sig">> end)},
             #{},
@@ -1183,7 +1244,7 @@ t_auth_helpers(_Config) ->
     ),
     ?assertEqual(<<"sig">>, maps:get(sig, NkeyParams)),
     ?assertEqual(
-        {error, {invalid_nkey_signature, <<"invalid">>}},
+        {error, expected_badarg(sign_fun, invalid_result)},
         enats_auth:connect_params(
             #{mechanism => nkey, public_key => <<"key">>, sign_fun => (fun(_) -> {error, bad} end)},
             #{nonce => <<"nonce">>},
@@ -1191,7 +1252,7 @@ t_auth_helpers(_Config) ->
         )
     ),
     ?assertEqual(
-        {error, {invalid_nkey_signature, <<"invalid">>}},
+        {error, expected_badarg(sign_fun, invalid_result)},
         enats_auth:connect_params(
             #{mechanism => nkey, public_key => <<"key">>, sign_fun => (fun(_) -> bad end)},
             #{nonce => <<"nonce">>},
@@ -1199,24 +1260,32 @@ t_auth_helpers(_Config) ->
         )
     ),
     ?assertEqual(
-        {error, secret_provider_failed},
+        expected_error(auth_error, #{operation => resolve_secret, code => provider_failed}),
         enats_auth:connect_params(
             #{mechanism => token, token => (fun() -> erlang:error(bad) end)}, #{}, #{}
         )
     ),
     ?assertEqual(
-        {error, nkey_nonce_missing},
+        expected_error(protocol_error, #{phase => authentication, code => missing_nonce}),
         enats_auth:connect_params(
             #{mechanism => nkey_seed, seed => Seed}, #{}, #{}
         )
     ),
-    ?assertEqual({error, invalid_secret_type}, enats_auth:resolve_secret(fun() -> bad end)),
     ?assertEqual(
-        {error, secret_provider_failed}, enats_auth:resolve_secret(fun() -> {error, bad} end)
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:resolve_secret(fun() -> bad end)
     ),
-    ?assertEqual({error, invalid_credentials_type}, enats_auth:validate_credentials(not_binary)),
+    ?assertEqual(
+        expected_error(auth_error, #{operation => resolve_secret, code => provider_failed}),
+        enats_auth:resolve_secret(fun() -> {error, bad} end)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(authentication, bad_type)},
+        enats_auth:validate_credentials(not_binary)
+    ),
     ?assertMatch(
-        {error, {credentials_file, _}}, enats_auth:validate_credentials_file("/no/such/file")
+        {error, #{reason := auth_error, details := #{operation := read_credentials}}},
+        enats_auth:validate_credentials_file("/no/such/file")
     ),
     ?assertEqual(ok, enats_auth:validate(#{mechanism => token, token => <<"token">>})),
     ?assertEqual(ok, enats_auth:validate(#{mechanism => nkey_seed, seed => Seed})),
@@ -1253,7 +1322,8 @@ t_secret_and_subject(_Config) ->
     ?assertEqual({ok, <<"value">>}, enats_auth:resolve_secret(<<"value">>)),
     ?assertEqual({ok, <<"value">>}, enats_auth:resolve_secret(fun() -> {ok, <<"value">>} end)),
     ?assertEqual(
-        {error, secret_provider_failed}, enats_auth:resolve_secret(fun() -> erlang:error(bad) end)
+        expected_error(auth_error, #{operation => resolve_secret, code => provider_failed}),
+        enats_auth:resolve_secret(fun() -> erlang:error(bad) end)
     ),
     ?assertEqual(
         #{password => <<"******">>, nested => [#{token => <<"******">>}]},
@@ -1264,14 +1334,15 @@ t_secret_and_subject(_Config) ->
 t_invalid_subject(_Config) ->
     {ok, Client} = enats_client:start_link(#{owner => self()}),
     ?assertEqual(
-        {error, {invalid, subject, bad_value}},
+        {error, expected_badarg(subject, bad_value)},
         enats_client:publish(Client, <<"bad subject">>, <<"payload">>)
     ),
     ?assertEqual(
-        {error, {invalid, subject, bad_value}}, enats_client:publish(Client, <<>>, <<"payload">>)
+        {error, expected_badarg(subject, bad_value)},
+        enats_client:publish(Client, <<>>, <<"payload">>)
     ),
     ?assertEqual(
-        {error, {invalid, subject, wildcard_not_allowed}},
+        {error, expected_badarg(subject, wildcard_not_allowed)},
         enats_client:publish(Client, <<"foo.*">>, <<"payload">>)
     ),
     ok = enats_client:stop(Client).
@@ -1555,7 +1626,7 @@ t_connect_pong_timeout(_Config) ->
 t_connect_pong_deadline(_Config) ->
     {Server, Port} = start_fake_server(hang),
     {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
-    ?assertEqual({error, timeout}, enats_client:connect(Client, 200)),
+    ?assertEqual(expected_timeout(connect), enats_client:connect(Client, 200)),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
     exit(Server, normal).
@@ -1565,7 +1636,8 @@ t_connection_queries(Config) ->
         host => "127.0.0.1", port => ?config(port, Config), owner => self()
     }),
     ?assertEqual(
-        {error, disconnected}, enats_client:publish(Client, <<"valid.subject">>, <<"payload">>)
+        expected_connection(publish, disconnected),
+        enats_client:publish(Client, <<"valid.subject">>, <<"payload">>)
     ),
     ok = enats_client:connect(Client),
     Info = enats_client:info(Client),
@@ -1575,17 +1647,20 @@ t_connection_queries(Config) ->
         enats_connection:publish(Client, <<"bad subject">>, <<"payload">>, #{})
     ),
     ?assertEqual(
-        {error, {invalid, subject, bad_value}},
+        {error, expected_badarg(subject, bad_value)},
         enats_client:subscribe(Client, <<"bad subject">>, #{})
     ),
     ?assertEqual(
-        {error, {no_responders, <<"503">>}},
+        expected_error(server_error, #{source => core, code => no_responders, status => 503}),
         enats_client:request(Client, <<"no.reply">>, <<"payload">>, #{timeout => 20})
     ),
     ?assertMatch(
         {error, _}, enats_client:jetstream_publish(Client, <<"subject">>, <<"payload">>, #{})
     ),
-    ?assertEqual({error, not_found}, enats_client:unsubscribe(Client, make_ref())),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => unsubscribe, code => not_found}),
+        enats_client:unsubscribe(Client, make_ref())
+    ),
     ok = enats_client:disconnect(Client),
     ok = enats_client:stop(Client),
     {Server, Port} = start_fake_server(flush_timeout),
@@ -1593,7 +1668,7 @@ t_connection_queries(Config) ->
         host => "127.0.0.1", port => Port, owner => self()
     }),
     ok = enats_client:connect(FlushClient),
-    ?assertEqual({error, timeout}, enats_client:flush(FlushClient, 20)),
+    ?assertEqual(expected_timeout_unknown(flush), enats_client:flush(FlushClient, 20)),
     ok = enats_client:stop(FlushClient),
     exit(Server, normal).
 
@@ -1602,7 +1677,10 @@ t_fake_connection_paths(_Config) ->
     {ok, ErrorClient} = enats_client:start_link(#{
         host => "127.0.0.1", port => ErrorPort, owner => self()
     }),
-    ?assertEqual({error, {server_error, <<"\"bad\"">>}}, enats_client:connect(ErrorClient)),
+    ?assertEqual(
+        expected_error(server_error, #{source => core, code => nats_error, message => <<"\"bad\"">>}),
+        enats_client:connect(ErrorClient)
+    ),
     ok = enats_client:stop(ErrorClient),
     exit(ErrorServer, normal),
     {CloseServer, ClosePort} = start_fake_server(close_without_pong),
@@ -1619,10 +1697,17 @@ t_protocol_error_disconnect(_Config) ->
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     receive
-        {enats_client, Client, disconnected, {server_error, {unknown_frame, <<"BOGUS">>}}} -> ok
+        {enats_client, Client, disconnected, #{
+            reason := protocol_error, details := #{code := invalid_frame}
+        }} ->
+            ok
     after 1000 -> ct:fail(protocol_error_not_reported)
     end,
     ?assertEqual(disconnected, enats_client:status(Client)),
+    ?assertMatch(
+        #{reason := protocol_error, details := #{code := invalid_frame}},
+        maps:get(last_error, enats_client:stats(Client))
+    ),
     {ok, Snapshot} = enats_client:diagnostics(Client),
     ?assert(maps:get(protocol_errors, maps:get(counters, Snapshot)) >= 1),
     ok = enats_client:stop(Client),
@@ -1652,7 +1737,10 @@ t_reconnect(_Config) ->
     ok = enats_client:connect(Client),
     {ok, _} = enats_client:subscribe(Client, <<"reconnect.test">>, #{}),
     receive
-        {enats_client, Client, disconnected, closed} -> ok
+        {enats_client, Client, disconnected, #{
+            reason := connection_failed, details := #{cause := closed}
+        }} ->
+            ok
     after 2000 -> ct:fail(reconnect_disconnect_not_observed)
     end,
     ?assertEqual(reconnecting, enats_client:status(Client)),
@@ -1660,7 +1748,12 @@ t_reconnect(_Config) ->
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     {ok, _} = enats_client:diagnostics(Client),
     ok = enats_client:disable_diagnostics(Client),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:reset_diagnostics(Client)),
+    ?assertEqual(
+        expected_error(bad_operation, #{
+            operation => reset_diagnostics, code => diagnostics_disabled
+        }),
+        enats_client:reset_diagnostics(Client)
+    ),
     receive
         {enats_client, Client, connected, _Info} -> ok
     after 2000 -> ct:fail(reconnect_not_observed)
@@ -1678,7 +1771,10 @@ t_reconnect_cancel(_Config) ->
     }),
     ok = enats_client:connect(Client),
     receive
-        {enats_client, Client, disconnected, closed} -> ok
+        {enats_client, Client, disconnected, #{
+            reason := connection_failed, details := #{cause := closed}
+        }} ->
+            ok
     after 2000 -> ct:fail(reconnect_disconnect_not_observed)
     end,
     ?assertEqual(reconnecting, enats_client:status(Client)),
@@ -1700,7 +1796,10 @@ t_reconnect_exhausted(_Config) ->
     }),
     ok = enats_client:connect(Client),
     receive
-        {enats_client, Client, disconnected, closed} -> ok
+        {enats_client, Client, disconnected, #{
+            reason := connection_failed, details := #{cause := closed}
+        }} ->
+            ok
     after 2000 -> ct:fail(initial_disconnect_not_observed)
     end,
     receive
@@ -1751,11 +1850,18 @@ t_disconnect_while_connecting(_Config) ->
     timer:sleep(1),
     ?assertEqual(connecting, enats_client:status(InfoClient)),
     ?assertEqual(connecting, maps:get(status, enats_client:stats(InfoClient))),
-    ?assertEqual({error, connecting}, enats_client:info(InfoClient)),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(InfoClient)),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => info, code => connecting}),
+        enats_client:info(InfoClient)
+    ),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => diagnostics, code => diagnostics_disabled}),
+        enats_client:diagnostics(InfoClient)
+    ),
     ok = enats_client:disconnect(InfoClient),
     receive
-        {connect_result, {error, disconnected}} -> ok
+        {connect_result, {error, #{reason := connection_failed, details := #{phase := connect}}}} ->
+            ok
     after 1000 -> ct:fail(connect_call_not_replied)
     end,
     ok = enats_client:stop(InfoClient),
@@ -1776,11 +1882,19 @@ t_disconnect_while_connecting(_Config) ->
     timer:sleep(1),
     ?assertEqual(connecting, enats_client:status(PongClient)),
     ?assertEqual(connecting, maps:get(status, enats_client:stats(PongClient))),
-    ?assertEqual({error, connecting}, enats_client:info(PongClient)),
-    ?assertEqual({error, diagnostics_disabled}, enats_client:diagnostics(PongClient)),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => info, code => connecting}),
+        enats_client:info(PongClient)
+    ),
+    ?assertEqual(
+        expected_error(bad_operation, #{operation => diagnostics, code => diagnostics_disabled}),
+        enats_client:diagnostics(PongClient)
+    ),
     ok = enats_client:disconnect(PongClient),
     receive
-        {pong_connect_result, {error, disconnected}} -> ok
+        {pong_connect_result,
+            {error, #{reason := connection_failed, details := #{phase := connect}}}} ->
+            ok
     after 1000 -> ct:fail(pong_call_not_replied)
     end,
     ok = enats_client:stop(PongClient),
@@ -1971,7 +2085,9 @@ t_nkey_seed(_Config) ->
     CredsAuth = #{mechanism => credentials, provider => fun() -> {ok, Creds} end},
     {ok, CredsParams} = enats_auth:connect_params(CredsAuth, #{nonce => <<"nonce">>}, #{}),
     ?assertEqual(<<"jwt">>, maps:get(jwt, CredsParams)),
-    ?assertEqual({error, invalid_nkey_seed}, enats_auth:from_seed(<<"bad">>)).
+    ?assertEqual(
+        {error, expected_badarg(nkey_seed, invalid_seed)}, enats_auth:from_seed(<<"bad">>)
+    ).
 
 t_credentials_file_provider(Config) ->
     Seed = encode_seed(<<1:256>>),
@@ -1990,7 +2106,13 @@ t_credentials_file_provider(Config) ->
         ?assertEqual(<<"jwt-1">>, maps:get(jwt, Params1)),
         ok = file:write_file(Filename, Contents2),
         {ok, Params2} = enats_auth:connect_params(Auth, #{nonce => <<"nonce">>}, #{}),
-        ?assertEqual(<<"jwt-2">>, maps:get(jwt, Params2))
+        ?assertEqual(<<"jwt-2">>, maps:get(jwt, Params2)),
+        ok = file:delete(Filename),
+        ?assertEqual(
+            expected_error(auth_error, #{operation => read_credentials, code => enoent}),
+            enats_auth:connect_params(Auth, #{nonce => <<"nonce">>}, #{})
+        ),
+        ok = file:write_file(Filename, Contents2)
     after
         ok = file:delete(Filename)
     end.
@@ -2020,7 +2142,7 @@ t_request_timeout_cleanup(_Config) ->
     after 1000 -> ct:fail(request_sub_not_seen)
     end,
     receive
-        {request_result, {error, timeout}} -> ok
+        {request_result, {error, #{reason := timeout, details := #{phase := request}}}} -> ok
     after 1000 -> ct:fail(request_timeout_not_seen)
     end,
     ok = enats_client:stop(Client),
@@ -2054,7 +2176,7 @@ t_jetstream_no_responders(_Config) ->
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {jetstream, unavailable, 503}},
+        expected_error(server_error, #{source => jetstream, code => unavailable, status => 503}),
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     {ok, Snapshot} = enats_client:diagnostics(Client),
@@ -2067,7 +2189,7 @@ t_jetstream_status_rejected(_Config) ->
     {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {jetstream, unavailable, 500}},
+        expected_error(server_error, #{source => jetstream, code => unavailable, status => 500}),
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2078,7 +2200,10 @@ t_tls_downgrade_rejected(_Config) ->
     {ok, Client} = enats_client:start_link(#{
         host => "127.0.0.1", port => Port, tls => true, owner => self()
     }),
-    ?assertEqual({error, {tls_upgrade_failed, tls_not_available}}, enats_client:connect(Client)),
+    ?assertEqual(
+        expected_error(connection_failed, #{phase => connect, cause => tls_failed}),
+        enats_client:connect(Client)
+    ),
     ok = enats_client:stop(Client),
     exit(Server, normal).
 
@@ -2086,8 +2211,8 @@ t_jetstream_json_unavailable(_Config) ->
     {Server, Port} = start_fake_server(jetstream_json_unavailable),
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
-    ?assertMatch(
-        {error, {jetstream, unavailable, 503}},
+    ?assertEqual(
+        expected_error(server_error, #{source => jetstream, code => unavailable, status => 503}),
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2098,7 +2223,7 @@ t_jetstream_json_rejected(_Config) ->
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {jetstream, rejected, 400}},
+        expected_error(server_error, #{source => jetstream, code => rejected, status => 400}),
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2608,3 +2733,24 @@ wait_socket_closed(Socket) ->
         {error, timeout} -> wait_socket_closed(Socket);
         Error -> ct:fail({unexpected_socket_result, Error})
     end.
+
+expected_badarg(Field, Code) ->
+    #{reason => badarg, details => #{field => Field, code => Code}}.
+
+expected_badarg(Field, Code, Extra) ->
+    #{reason => badarg, details => maps:merge(#{field => Field, code => Code}, Extra)}.
+
+expected_error(Reason, Details) ->
+    {error, #{reason => Reason, details => Details}}.
+
+expected_connection(Phase, Cause) ->
+    expected_error(connection_failed, #{phase => Phase, cause => Cause}).
+
+expected_connection_unknown(Phase, Cause) ->
+    expected_error(connection_failed, #{phase => Phase, cause => Cause, outcome => unknown}).
+
+expected_timeout(Phase) ->
+    expected_error(timeout, #{phase => Phase}).
+
+expected_timeout_unknown(Phase) ->
+    expected_error(timeout, #{phase => Phase, outcome => unknown}).

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+Replace public error terms with `{error, #{reason => Reason, details => Details}}`
+across the client and authentication helpers. Connection-loss notifications and
+`stats.last_error` now use the same error map. Validation errors no longer echo
+credential values, and JetStream status codes are consistently integers. This
+is a breaking error API change; consumers must update their error matching.
+
 ## 0.1.12
 
 Add batch publishing with opt-in admission limits, optimize subscription

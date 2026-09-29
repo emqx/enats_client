@@ -51,7 +51,7 @@
     | {hpub, binary(), undefined | binary(), [header()], binary()}
     | {sub, binary(), binary(), undefined | binary()}
     | {unsub, binary()}.
--type header_error() :: {invalid, headers, term()}.
+-type header_error() :: enats_error:error().
 -export_type([header/0, frame/0, parse_state/0, limits/0, wire_frame/0]).
 
 -spec initial_state() -> parse_state().
@@ -269,9 +269,12 @@ headers_size([]) -> 0;
 headers_size(Headers) -> byte_size(encode_headers(Headers)).
 
 -spec validate_headers([header()]) -> ok | {error, header_error()}.
-validate_headers(Headers) when is_list(Headers) ->
-    validate_headers(Headers, ok);
 validate_headers(Headers) ->
+    enats_error:wrap(validate_headers, validate_headers_raw(Headers)).
+
+validate_headers_raw(Headers) when is_list(Headers) ->
+    validate_headers(Headers, ok);
+validate_headers_raw(Headers) ->
     {error, {invalid, headers, {bad_value, Headers}}}.
 
 validate_headers([], Result) ->

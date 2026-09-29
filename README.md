@@ -193,26 +193,23 @@ connection.
 
 ## Errors
 
-Public calls return `{error, Reason}` for invalid arguments, transport and
-TLS failures, protocol errors, timeouts, server errors and JetStream
-rejections. The client process is not terminated by malformed user input.
+Public client calls and authentication helpers return errors as
+`{error, #{reason => Reason, details => Details}}`. `Reason` is one of
+`badarg`, `bad_operation`, `auth_error`, `connection_failed`, `timeout`,
+`protocol_error`, `server_error`, or `internal_error`. Each reason has a
+defined set of detail fields; see `enats_error:error/0`.
 
-Caller input errors use one shape: `{invalid, Field, Detail}`. For example,
-`{invalid, subject, bad_value}` and
-`{invalid, options, {unknown_keys, [tls_typo]}}`. Batch validation keeps the
-failing message index as
-`{invalid, batch_message, {Index, {invalid, Field, Detail}}}`. A valid
-operation sent to an already disconnected client returns `disconnected`;
-a pending request or flush interrupted by a connection loss returns
-`{disconnected, Cause}`. A timeout or disconnect after a publish does not prove
-that the server missed the message.
-JetStream errors return a three-digit server status as an integer when one is
-provided, whether it arrived in a status header or a PubAck JSON body.
+For example, an invalid subject returns
+`{error, #{reason => badarg, details => #{field => subject, code => bad_value}}}`.
+A bad batch item adds `index` to those details. A JetStream 503 response
+returns `server_error` with `source => jetstream`, `code => unavailable`, and
+`status => 503`. Unknown option names are reported in `details.keys` without
+echoing credential values.
 
-Unknown option keys are rejected with
-`{error, {invalid, Scope, {unknown_keys, Keys}}}`. This prevents a
-misspelled TLS, reconnect, subscription or diagnostics setting from being
-silently ignored.
+An interrupted flush or request may have reached the server. Such errors
+include `outcome => unknown`; callers choose their own retry and deduplication
+policy. Unexpected disconnection notifications and `stats.last_error` carry
+the same error map. A requested disconnect remains a normal event.
 
 ## Tests and development
 
