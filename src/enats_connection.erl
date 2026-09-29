@@ -332,7 +332,7 @@ connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
                     reply(From, {error, Reason})
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {publish_batch, Messages}, State) ->
     case prepare_batch(Messages, State) of
@@ -404,7 +404,7 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
                     reply(From, {error, Reason})
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {subscribe, Subject, Options}, State) ->
     case validate_subject(Subject, true) of
@@ -439,7 +439,7 @@ connected({call, From}, {subscribe, Subject, Options}, State) ->
                     lost_with_reply(From, Reason, State)
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {unsubscribe, Ref}, State) ->
     case maps:take(Ref, maps:get(subscriptions, State)) of
@@ -1121,7 +1121,7 @@ prepare_batch_message(Message, State, _Index) when is_map(Message) ->
                         error:badarg -> {error, invalid_payload}
                     end;
                 {error, Reason} ->
-                    {error, {invalid_subject, Reason}}
+                    {error, Reason}
             end;
         ok ->
             {error, invalid_options};

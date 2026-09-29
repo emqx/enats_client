@@ -217,7 +217,6 @@
     | {tls_upgrade_failed, error_value()}
     | {invalid_ssl_options, error_value()}
     | {protocol, error_value()}
-    | {auth, error_value()}
     | {no_responders, binary()}
     | {disconnected, error_value()}
     | {client_exit, error_value()}
@@ -731,7 +730,7 @@ jetstream_request(Client, Subject, Payload, Headers, Timeout) ->
                 Status -> classify_status(Status)
             end;
         {error, {no_responders, Status}} ->
-            {error, {jetstream, unavailable, Status}};
+            {error, {jetstream, unavailable, jetstream_status_code(Status)}};
         {error, _} = Error ->
             Error
     end.
@@ -759,13 +758,27 @@ response_status(Headers) ->
         false -> undefined
     end.
 
-classify_status(<<"5", _/binary>> = Status) -> {error, {jetstream, unavailable, Status}};
-classify_status(Status) -> {error, {jetstream, rejected, Status}}.
+classify_status(<<"5", _/binary>> = Status) ->
+    {error, {jetstream, unavailable, jetstream_status_code(Status)}};
+classify_status(Status) ->
+    {error, {jetstream, rejected, jetstream_status_code(Status)}}.
+
+jetstream_status_code(<<Hundreds, Tens, Ones>> = Status) when
+    Hundreds >= $0,
+    Hundreds =< $9,
+    Tens >= $0,
+    Tens =< $9,
+    Ones >= $0,
+    Ones =< $9
+->
+    binary_to_integer(Status);
+jetstream_status_code(Status) ->
+    Status.
 
 decode_pub_ack(Payload) ->
     try jiffy:decode(Payload, [return_maps]) of
         #{<<"error">> := Error} ->
-            classify_error(Error);
+            classify_pub_ack_error(Error);
         #{<<"stream">> := Stream, <<"seq">> := Sequence} = Ack ->
             {ok, #{
                 stream => Stream,
@@ -778,7 +791,9 @@ decode_pub_ack(Payload) ->
         _:_ -> {error, {jetstream, invalid_ack, invalid_payload}}
     end.
 
-classify_error(#{<<"code">> := Code}) when is_integer(Code), Code >= 500 ->
+classify_pub_ack_error(#{<<"code">> := Code}) when is_integer(Code), Code >= 500 ->
     {error, {jetstream, unavailable, Code}};
-classify_error(_Error) ->
+classify_pub_ack_error(#{<<"code">> := Code}) when is_integer(Code) ->
+    {error, {jetstream, rejected, Code}};
+classify_pub_ack_error(_Error) ->
     {error, {jetstream, rejected, invalid_payload}}.

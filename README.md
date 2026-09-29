@@ -197,6 +197,16 @@ Public calls return `{error, Reason}` for invalid arguments, transport and
 TLS failures, protocol errors, timeouts, server errors and JetStream
 rejections. The client process is not terminated by malformed user input.
 
+Invalid subjects return `invalid_subject` (or
+`wildcard_subject_not_allowed`). Batch validation adds the failing message
+index as `{invalid_batch_message, Index, Reason}`. A valid operation sent to
+an already disconnected client returns `disconnected`; a pending request or
+flush interrupted by a connection loss returns `{disconnected, Cause}`. A
+timeout or disconnect after a publish does not prove that the server missed
+the message.
+JetStream errors return a three-digit server status as an integer when one is
+provided, whether it arrived in a status header or a PubAck JSON body.
+
 Unknown option keys are rejected with
 `{error, {invalid_option, Scope, {unknown_keys, Keys}}}`. This prevents a
 misspelled TLS, reconnect, subscription or diagnostics setting from being

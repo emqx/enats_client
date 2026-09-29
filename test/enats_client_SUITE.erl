@@ -57,6 +57,7 @@
     t_jetstream_no_responders/1,
     t_jetstream_status_rejected/1,
     t_jetstream_json_unavailable/1,
+    t_jetstream_json_rejected/1,
     t_tls_downgrade_rejected/1,
     t_tls_first/1,
     t_request_infinity/1,
@@ -128,6 +129,7 @@ all() ->
         t_jetstream_no_responders,
         t_jetstream_status_rejected,
         t_jetstream_json_unavailable,
+        t_jetstream_json_rejected,
         t_tls_downgrade_rejected,
         t_tls_first,
         t_request_infinity,
@@ -388,6 +390,12 @@ t_publish_batch(Config) ->
         {error, {invalid_batch_message, 1, _}},
         enats_client:publish_batch(Client, [
             #{subject => <<"batch.test">>, payload => <<"one">>, unknown => true}
+        ])
+    ),
+    ?assertEqual(
+        {error, {invalid_batch_message, 1, invalid_subject}},
+        enats_client:publish_batch(Client, [
+            #{subject => <<"bad subject">>, payload => <<"one">>}
         ])
     ),
     {ok, LimitedClient} = enats_client:start_link(#{
@@ -1541,7 +1549,7 @@ t_connection_queries(Config) ->
     Info = enats_client:info(Client),
     ?assertEqual(?config(port, Config), maps:get(port, Info)),
     ?assertEqual(
-        {error, {invalid_subject, invalid_subject}},
+        {error, invalid_subject},
         enats_connection:publish(Client, <<"bad subject">>, <<"payload">>, #{})
     ),
     ?assertEqual(
@@ -2024,7 +2032,7 @@ t_jetstream_no_responders(_Config) ->
     ok = enats_client:enable_diagnostics(Client, #{message_sample_every => 1}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {jetstream, unavailable, <<"503">>}},
+        {error, {jetstream, unavailable, 503}},
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     {ok, Snapshot} = enats_client:diagnostics(Client),
@@ -2037,7 +2045,7 @@ t_jetstream_status_rejected(_Config) ->
     {ok, Client} = enats_client:start_link(#{port => Port, owner => self()}),
     ok = enats_client:connect(Client),
     ?assertEqual(
-        {error, {jetstream, unavailable, <<"500">>}},
+        {error, {jetstream, unavailable, 500}},
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2058,6 +2066,17 @@ t_jetstream_json_unavailable(_Config) ->
     ok = enats_client:connect(Client),
     ?assertMatch(
         {error, {jetstream, unavailable, 503}},
+        enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
+    ),
+    ok = enats_client:stop(Client),
+    exit(Server, normal).
+
+t_jetstream_json_rejected(_Config) ->
+    {Server, Port} = start_fake_server(jetstream_json_rejected),
+    {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => Port, owner => self()}),
+    ok = enats_client:connect(Client),
+    ?assertEqual(
+        {error, {jetstream, rejected, 400}},
         enats_client:jetstream_publish(Client, <<"orders.test">>, <<"payload">>, #{timeout => 1000})
     ),
     ok = enats_client:stop(Client),
@@ -2414,7 +2433,10 @@ fake_server(Parent, Mode) ->
                 ipv6 ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     timer:sleep(50);
-                jetstream_json_unavailable ->
+                JsonMode when
+                    JsonMode =:= jetstream_json_unavailable;
+                    JsonMode =:= jetstream_json_rejected
+                ->
                     ok = gen_tcp:send(Socket, <<"PONG\r\n">>),
                     {ok, SubData0} = recv_until(Socket, <<"SUB ">>, InitialData),
                     {ok, SubData} = recv_until(Socket, <<"\r\n">>, SubData0),
@@ -2424,7 +2446,12 @@ fake_server(Parent, Mode) ->
                     [_, _RequestSubject, ReplyTo | _] = binary:split(
                         find_pub_line(PubData), <<" ">>, [global]
                     ),
-                    Payload = <<"{\"error\":{\"code\":503,\"description\":\"temporary\"}}">>,
+                    Code =
+                        case JsonMode of
+                            jetstream_json_unavailable -> 503;
+                            jetstream_json_rejected -> 400
+                        end,
+                    Payload = <<"{\"error\":{\"code\":", (integer_to_binary(Code))/binary, "}}">>,
                     ok = gen_tcp:send(Socket, [
                         <<"MSG ">>,
                         ReplyTo,
