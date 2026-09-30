@@ -900,7 +900,8 @@ connect_failed(
         false ->
             close(State),
             Timeout = attempt_timeout(State),
-            State0 = reset_transport(State),
+            FailedState = State#{last_error => enats_error:normalize(connect, Reason)},
+            State0 = reset_transport(FailedState),
             case
                 open_socket(
                     State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout
@@ -958,7 +959,8 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
             ),
             {ok, Socket, State2#{nats_started_at => diagnostic_now(State2)}};
         {error, Reason} when Attempts > 1 ->
-            FailedState = record_counter(connect_failures, State1),
+            FailedState0 = record_counter(connect_failures, State1),
+            FailedState = FailedState0#{last_error => enats_error:normalize(connect, Reason)},
             case local_connect_error(Reason) of
                 true ->
                     {error, Reason, FailedState};
@@ -1400,7 +1402,7 @@ drain_failed(Reason, State) ->
     close(State1),
     reply_flushes(State1, {error, {disconnected, Reason}}),
     reply_requests(State1, {error, {disconnected, Reason}}),
-    notify(State1, disconnected, Reason),
+    notify(State1, disconnected, maps:get(last_error, State1)),
     {next_state, disconnected, clear_socket(clear_subscriptions(State1)), []}.
 
 lost(_StateName, Reason, State) ->
@@ -1412,7 +1414,10 @@ lost(_StateName, Reason, State) ->
     reply_flushes(State0, {error, {disconnected, Reason}}),
     reply_requests(State0, {error, {disconnected, Reason}}),
     notify(State0, disconnected, Reason),
-    case reconnect_enabled(maps:get(reconnect, maps:get(options, State0))) of
+    case
+        reconnect_enabled(maps:get(reconnect, maps:get(options, State0))) andalso
+            not local_connect_error(Reason)
+    of
         false ->
             {next_state, disconnected, clear_socket(State0), []};
         true ->

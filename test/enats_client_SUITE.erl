@@ -50,6 +50,7 @@
     t_server_failover/1,
     t_server_failover_handshake/1,
     t_local_auth_failure_no_failover/1,
+    t_local_auth_failure_stops_reconnect/1,
     t_nkey_nats_server/1,
     t_token_nats_server/1,
     t_jetstream_nats_server/1,
@@ -124,6 +125,7 @@ all() ->
         t_server_failover,
         t_server_failover_handshake,
         t_local_auth_failure_no_failover,
+        t_local_auth_failure_stops_reconnect,
         t_nkey_nats_server,
         t_token_nats_server,
         t_jetstream_nats_server,
@@ -969,10 +971,12 @@ t_drain_socket_close_no_reconnect(_Config) ->
     after 1000 -> ct:fail(drain_close_not_returned)
     end,
     ?assertEqual(disconnected, enats_client:status(Client)),
-    ?assertEqual(
-        #{reason => connection_failed, details => #{phase => drain, cause => closed}},
-        maps:get(last_error, enats_client:stats(Client))
-    ),
+    LastError = #{reason => connection_failed, details => #{phase => drain, cause => closed}},
+    ?assertEqual(LastError, maps:get(last_error, enats_client:stats(Client))),
+    receive
+        {enats_client, Client, disconnected, LastError} -> ok
+    after 1000 -> ct:fail(drain_disconnect_notification_not_observed)
+    end,
     timer:sleep(50),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ok = enats_client:stop(Client),
@@ -1333,6 +1337,13 @@ t_auth_helpers(_Config) ->
         )
     ),
     Seed = encode_seed(<<1:256>>),
+    ?assertEqual(
+        {error, expected_badarg(nonce, bad_type)}, enats_auth:sign_seed(Seed, 42)
+    ),
+    ?assertEqual(
+        {error, expected_badarg(nkey_seed, bad_type)},
+        enats_auth:sign_seed(42, <<"nonce">>)
+    ),
     {ok, SeedParams} = enats_auth:connect_params(
         #{mechanism => nkey_seed, seed => (fun() -> Seed end)},
         #{nonce => <<"nonce">>},
@@ -2071,6 +2082,10 @@ t_server_failover(Config) ->
     }),
     ok = enats_client:connect(Client),
     ?assertEqual(connected, enats_client:status(Client)),
+    ?assertEqual(
+        #{reason => connection_failed, details => #{phase => connect, cause => econnrefused}},
+        maps:get(last_error, enats_client:stats(Client))
+    ),
     ok = enats_client:stop(Client).
 
 t_server_failover_handshake(_Config) ->
@@ -2083,7 +2098,11 @@ t_server_failover_handshake(_Config) ->
     }),
     try
         ok = enats_client:connect(Client, 500),
-        ?assertEqual(connected, enats_client:status(Client))
+        ?assertEqual(connected, enats_client:status(Client)),
+        ?assertEqual(
+            #{reason => timeout, details => #{phase => connect}},
+            maps:get(last_error, enats_client:stats(Client))
+        )
     after
         ok = enats_client:stop(Client),
         exit(SilentServer, normal),
@@ -2091,6 +2110,14 @@ t_server_failover_handshake(_Config) ->
     end.
 
 t_local_auth_failure_no_failover(_Config) ->
+    local_auth_failure_case(false).
+
+t_local_auth_failure_stops_reconnect(_Config) ->
+    local_auth_failure_case(#{
+        min_delay => 10, max_delay => 10, max_attempts => 1, jitter => 0.0
+    }).
+
+local_auth_failure_case(Reconnect) ->
     {Server, Port} = start_fake_server(auth_provider_failure),
     Parent = self(),
     Auth = #{
@@ -2104,6 +2131,7 @@ t_local_auth_failure_no_failover(_Config) ->
         servers => [{"127.0.0.1", Port}, {"127.0.0.1", 1}],
         auth => Auth,
         connect_timeout => 500,
+        reconnect => Reconnect,
         owner => self()
     }),
     Expected = expected_error(auth_error, #{operation => resolve_secret, code => provider_failed}),
@@ -2114,6 +2142,28 @@ t_local_auth_failure_no_failover(_Config) ->
         receive
             provider_called -> ok
         after 1000 -> ct:fail(provider_not_called)
+        end,
+        case Reconnect of
+            false ->
+                ok;
+            _ ->
+                timer:sleep(100),
+                ?assertEqual(disconnected, enats_client:status(Client)),
+                ?assertEqual(
+                    element(2, Expected), maps:get(last_error, enats_client:stats(Client))
+                ),
+                ?assertEqual(
+                    {"127.0.0.1", Port}, maps:get(current_server, enats_client:stats(Client))
+                ),
+                receive
+                    provider_called -> ct:fail(provider_called_again)
+                after 0 -> ok
+                end,
+                receive
+                    {enats_client, Client, reconnect_exhausted, _} ->
+                        ct:fail(reconnect_exhausted_after_local_error)
+                after 0 -> ok
+                end
         end
     after
         ok = enats_client:stop(Client),

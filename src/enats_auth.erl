@@ -270,8 +270,10 @@ sign_seed_raw(Seed0, Nonce) when is_binary(Seed0), is_binary(Nonce) ->
     catch
         _:_ -> {error, invalid_nkey_seed}
     end;
+sign_seed_raw(Seed, _Nonce) when not is_binary(Seed) ->
+    {error, invalid_secret_type};
 sign_seed_raw(_Seed, _Nonce) ->
-    {error, invalid_secret_type}.
+    {error, {invalid, nonce, bad_type}}.
 
 -spec resolve_secret(secret_provider(binary())) -> {ok, binary()} | {error, auth_error()}.
 resolve_secret(Provider) -> enats_error:wrap(resolve_secret, resolve_secret_raw(Provider)).

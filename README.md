@@ -212,10 +212,11 @@ TLS handshake alerts report `cause => tls_alert` and the alert atom in
 An interrupted flush or request may have reached the server. Such errors
 include `outcome => unknown`; callers choose their own retry and deduplication
 policy. Unexpected disconnection notifications and `stats.last_error` carry
-the same error map. Initial failed dial attempts are recorded in
-`stats.last_error` too. A requested disconnect remains a normal event.
-Local authentication and option errors stop the current server failover so the
-original cause remains visible.
+the same error map. Failed dial and handshake attempts remain in
+`stats.last_error` after a later server succeeds. A requested disconnect
+remains a normal event. Local authentication and option errors stop server
+failover; local handshake errors also stop automatic reconnect so the original
+cause remains visible.
 
 ## Tests and development
 
