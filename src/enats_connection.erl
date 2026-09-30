@@ -890,31 +890,47 @@ process_connect_info(Info, Base, State) ->
     end.
 
 connect_failed(
-    StateName, _Reason, #{connect_from := From, connect_attempts := Attempts} = State
+    StateName, Reason, #{connect_from := From, connect_attempts := Attempts} = State
 ) when
     From =/= undefined, Attempts > 0
 ->
-    close(State),
-    Timeout = attempt_timeout(State),
-    State0 = reset_transport(State),
-    case
-        open_socket(State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout)
-    of
-        {ok, Socket, State1} ->
-            {next_state, waiting_info,
-                State1#{
-                    socket => Socket,
-                    connect_attempts => Attempts - 1,
-                    parse_state => parser_state(maps:get(options, State1))
-                },
-                [
-                    {state_timeout, attempt_timeout(State1), connect_timeout}
-                ]};
-        {error, NextReason, State1} ->
-            lost(StateName, NextReason, State1)
+    case local_connect_error(Reason) of
+        true ->
+            lost(StateName, Reason, State);
+        false ->
+            close(State),
+            Timeout = attempt_timeout(State),
+            State0 = reset_transport(State),
+            case
+                open_socket(
+                    State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout
+                )
+            of
+                {ok, Socket, State1} ->
+                    {next_state, waiting_info,
+                        State1#{
+                            socket => Socket,
+                            connect_attempts => Attempts - 1,
+                            parse_state => parser_state(maps:get(options, State1))
+                        },
+                        [{state_timeout, attempt_timeout(State1), connect_timeout}]};
+                {error, NextReason, State1} ->
+                    lost(StateName, NextReason, State1)
+            end
     end;
 connect_failed(StateName, Reason, State) ->
     lost(StateName, Reason, State).
+
+local_connect_error({invalid, auth, Error}) ->
+    local_connect_error(Error);
+local_connect_error({invalid, _Field, _Details}) ->
+    true;
+local_connect_error({tls_upgrade_failed, Reason}) ->
+    local_connect_error(Reason);
+local_connect_error(#{reason := Reason}) when Reason =:= badarg; Reason =:= auth_error ->
+    true;
+local_connect_error(_) ->
+    false.
 
 open_socket(State) ->
     Options = maps:get(options, State),
@@ -941,14 +957,19 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
                 State1
             ),
             {ok, Socket, State2#{nats_started_at => diagnostic_now(State2)}};
-        {error, _Reason} when Attempts > 1 ->
+        {error, Reason} when Attempts > 1 ->
             FailedState = record_counter(connect_failures, State1),
-            open_socket(
-                FailedState,
-                Attempts - 1,
-                Options,
-                remaining_timeout(maps:get(connect_deadline, State1, infinity))
-            );
+            case local_connect_error(Reason) of
+                true ->
+                    {error, Reason, FailedState};
+                false ->
+                    open_socket(
+                        FailedState,
+                        Attempts - 1,
+                        Options,
+                        remaining_timeout(maps:get(connect_deadline, State1, infinity))
+                    )
+            end;
         {error, Reason} ->
             {error, Reason, record_counter(connect_failures, State1)}
     end;

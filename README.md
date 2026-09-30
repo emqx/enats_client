@@ -214,6 +214,8 @@ include `outcome => unknown`; callers choose their own retry and deduplication
 policy. Unexpected disconnection notifications and `stats.last_error` carry
 the same error map. Initial failed dial attempts are recorded in
 `stats.last_error` too. A requested disconnect remains a normal event.
+Local authentication and option errors stop the current server failover so the
+original cause remains visible.
 
 ## Tests and development
 

@@ -8,6 +8,7 @@ across the client and authentication helpers. Connection-loss notifications and
 credential values, and JetStream status codes are consistently integers. This
 also preserves JetStream `err_code`, TLS alert codes, and the most recent
 connection failure. Malformed list inputs and TLS options return `badarg`.
+Local authentication and option errors no longer trigger server failover.
 This is a breaking error API change; consumers must update their error matching.
 
 ## 0.1.12

@@ -49,6 +49,7 @@
     t_topology_info/1,
     t_server_failover/1,
     t_server_failover_handshake/1,
+    t_local_auth_failure_no_failover/1,
     t_nkey_nats_server/1,
     t_token_nats_server/1,
     t_jetstream_nats_server/1,
@@ -122,6 +123,7 @@ all() ->
         t_topology_info,
         t_server_failover,
         t_server_failover_handshake,
+        t_local_auth_failure_no_failover,
         t_nkey_nats_server,
         t_token_nats_server,
         t_jetstream_nats_server,
@@ -1727,8 +1729,7 @@ verify_peer_tls_case(Port, CaFile, CertFile) ->
 
 t_connection_errors(_Config) ->
     {ok, TlsClient} = enats_client:start_link(#{
-        host => "127.0.0.1",
-        port => 1,
+        servers => [{"127.0.0.1", 1}, {"127.0.0.1", 2}],
         tls => true,
         tls_handshake => first,
         ssl_opts => [{bad_option, true}]
@@ -1736,6 +1737,7 @@ t_connection_errors(_Config) ->
     ?assertEqual(
         {error, expected_badarg(ssl_opts, bad_value)}, enats_client:connect(TlsClient)
     ),
+    ?assertEqual({"127.0.0.1", 1}, maps:get(current_server, enats_client:stats(TlsClient))),
     ok = enats_client:stop(TlsClient),
     {ok, BinaryHostClient} = enats_client:start_link(#{host => <<"127.0.0.1">>, port => 1}),
     ?assertMatch(
@@ -2086,6 +2088,36 @@ t_server_failover_handshake(_Config) ->
         ok = enats_client:stop(Client),
         exit(SilentServer, normal),
         exit(HealthyServer, normal)
+    end.
+
+t_local_auth_failure_no_failover(_Config) ->
+    {Server, Port} = start_fake_server(auth_provider_failure),
+    Parent = self(),
+    Auth = #{
+        mechanism => token,
+        token => fun() ->
+            Parent ! provider_called,
+            {error, local_failure}
+        end
+    },
+    {ok, Client} = enats_client:start_link(#{
+        servers => [{"127.0.0.1", Port}, {"127.0.0.1", 1}],
+        auth => Auth,
+        connect_timeout => 500,
+        owner => self()
+    }),
+    Expected = expected_error(auth_error, #{operation => resolve_secret, code => provider_failed}),
+    try
+        ?assertEqual(Expected, enats_client:connect(Client)),
+        ?assertEqual(element(2, Expected), maps:get(last_error, enats_client:stats(Client))),
+        ?assertEqual({"127.0.0.1", Port}, maps:get(current_server, enats_client:stats(Client))),
+        receive
+            provider_called -> ok
+        after 1000 -> ct:fail(provider_not_called)
+        end
+    after
+        ok = enats_client:stop(Client),
+        exit(Server, normal)
     end.
 
 t_nkey_nats_server(Config) ->
@@ -2503,6 +2535,8 @@ fake_server(Parent, Mode) ->
             fake_reconnect(Listener, Parent);
         reconnect_exhaust ->
             fake_reconnect_exhaust(Listener);
+        auth_provider_failure ->
+            fake_auth_provider_failure(Listener);
         info_update ->
             fake_info_update(Listener);
         stale_reconnect ->
@@ -2816,6 +2850,13 @@ fake_reconnect_exhaust(Listener) ->
     timer:sleep(20),
     gen_tcp:close(Listener),
     gen_tcp:close(First).
+
+fake_auth_provider_failure(Listener) ->
+    {ok, Socket} = gen_tcp:accept(Listener),
+    ok = gen_tcp:send(Socket, fake_info()),
+    ok = gen_tcp:close(Listener),
+    wait_socket_closed(Socket),
+    gen_tcp:close(Socket).
 
 fake_info_update(Listener) ->
     {ok, Socket} = gen_tcp:accept(Listener),
