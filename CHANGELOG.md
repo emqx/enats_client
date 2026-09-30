@@ -7,7 +7,7 @@ across the client and authentication helpers. Connection-loss notifications and
 `stats.last_error` now use the same error map. Validation errors no longer echo
 credential values, and JetStream status codes are consistently integers. This
 also preserves JetStream `err_code`, TLS alert codes, and the most recent
-reconnect failure. Malformed list inputs and TLS options return `badarg`.
+connection failure. Malformed list inputs and TLS options return `badarg`.
 This is a breaking error API change; consumers must update their error matching.
 
 ## 0.1.12

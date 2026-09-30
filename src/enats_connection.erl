@@ -232,7 +232,8 @@ connect_call(From, Timeout, State) ->
                     {state_timeout, attempt_timeout(State1), connect_timeout}
                 ]};
         {error, Reason, State1} ->
-            {keep_state, clear_pending_connect(State1), reply_action(From, {error, Reason})}
+            FailedState = State1#{last_error => enats_error:normalize(connect, Reason)},
+            {keep_state, clear_pending_connect(FailedState), reply_action(From, {error, Reason})}
     end.
 
 -spec waiting_info(value(), value(), state()) -> state_result().
@@ -248,6 +249,8 @@ waiting_info(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     connect_failed(waiting_info, closed, State);
 waiting_info(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     connect_failed(waiting_info, closed, State);
+waiting_info(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    connect_failed(waiting_info, {transport, Reason}, State);
 waiting_info(state_timeout, connect_timeout, State) ->
     connect_failed(waiting_info, timeout, State);
 waiting_info({call, From}, status, _State) ->
@@ -281,6 +284,8 @@ waiting_pong(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     connect_failed(waiting_pong, closed, State);
 waiting_pong(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     connect_failed(waiting_pong, closed, State);
+waiting_pong(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    connect_failed(waiting_pong, {transport, Reason}, State);
 waiting_pong(state_timeout, connect_timeout, State) ->
     connect_failed(waiting_pong, timeout, State);
 waiting_pong({call, From}, status, _State) ->
@@ -498,6 +503,8 @@ connected(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     lost(connected, closed, State);
 connected(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     lost(connected, closed, State);
+connected(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    lost(connected, {transport, Reason}, State);
 connected(info, {request_timeout, Sid}, State) ->
     request_timeout(Sid, State);
 connected(info, {'DOWN', Monitor, process, _Owner, _Reason}, State) ->
@@ -531,6 +538,8 @@ draining(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     drain_failed(closed, State);
 draining(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     drain_failed(closed, State);
+draining(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    drain_failed({transport, Reason}, State);
 draining(info, {flush_timeout, Ref}, State) ->
     State1 = expire_flush(Ref, State),
     close(State1),
@@ -924,7 +933,7 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
         State#{server_index => NextIndex, current_server => {Host, Port}}
     ),
     TransportStartedAt = diagnostic_now(State1),
-    case open_transport(Host, Port, Options, Timeout) of
+    case open_transport(socket_host(Host), Port, Options, Timeout) of
         {ok, Socket} ->
             State2 = record_latency(
                 transport_connect_latency,
@@ -1953,10 +1962,15 @@ transport_options(Host, Options) when is_tuple(Host), tuple_size(Host) =:= 8 ->
 transport_options(_Host, Options) ->
     Options.
 
+socket_host(Host) when is_binary(Host) ->
+    binary_to_list(Host);
+socket_host(Host) ->
+    Host.
+
 tls_server_name(Host) when is_tuple(Host) ->
     inet:ntoa(Host);
 tls_server_name(Host) ->
-    Host.
+    socket_host(Host).
 
 unique_servers(Servers) ->
     lists:reverse(

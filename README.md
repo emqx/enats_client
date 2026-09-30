@@ -212,7 +212,8 @@ TLS handshake alerts report `cause => tls_alert` and the alert atom in
 An interrupted flush or request may have reached the server. Such errors
 include `outcome => unknown`; callers choose their own retry and deduplication
 policy. Unexpected disconnection notifications and `stats.last_error` carry
-the same error map. A requested disconnect remains a normal event.
+the same error map. Initial failed dial attempts are recorded in
+`stats.last_error` too. A requested disconnect remains a normal event.
 
 ## Tests and development
 

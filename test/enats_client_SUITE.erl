@@ -532,6 +532,18 @@ t_publish_batch(Config) ->
 t_invalid_public_inputs(Config) ->
     ?assertEqual({error, expected_badarg(options, bad_type)}, enats_client:start_link(not_a_map)),
     ?assertEqual(
+        {error, expected_badarg(host, bad_value)},
+        enats_client:start_link(#{host => [<<"127.0.0.1">>]})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(servers, bad_value)},
+        enats_client:start_link(#{servers => [{[<<"127.0.0.1">>], 4222}]})
+    ),
+    ?assertEqual(
+        {error, expected_badarg(ssl_opts, bad_value)},
+        enats_client:start_link(#{tls => true, ssl_opts => [bad | tail]})
+    ),
+    ?assertEqual(
         {error, expected_badarg(servers, bad_value)},
         enats_client:start_link(#{servers => [{"127.0.0.1", 4222} | bad]})
     ),
@@ -1606,7 +1618,7 @@ t_tls_first(Config) ->
 
 tls_first_case(Port) ->
     {ok, Client} = enats_client:start_link(#{
-        host => "127.0.0.1",
+        host => <<"127.0.0.1">>,
         port => Port,
         tls => true,
         tls_handshake => first,
@@ -1623,6 +1635,20 @@ tls_first_case(Port) ->
     after 1000 -> ct:fail(tls_first_message_not_received)
     end,
     ok = enats_client:unsubscribe(Client, Subscription),
+    {connected, #{socket := {ssl, SslSocket}}} = sys:get_state(Client),
+    Client ! {ssl_error, SslSocket, {tls_alert, {unknown_ca, "rejected certificate"}}},
+    receive
+        {enats_client, Client, disconnected, #{
+            reason := connection_failed, details := #{cause := tls_alert, alert := unknown_ca}
+        }} ->
+            ok
+    after 1000 -> ct:fail(tls_error_not_observed)
+    end,
+    ?assertEqual(disconnected, enats_client:status(Client)),
+    ?assertMatch(
+        #{reason := connection_failed, details := #{cause := tls_alert, alert := unknown_ca}},
+        maps:get(last_error, enats_client:stats(Client))
+    ),
     ok = enats_client:stop(Client).
 
 generate_test_certificate(CertFile, KeyFile) ->
@@ -1711,10 +1737,23 @@ t_connection_errors(_Config) ->
         {error, expected_badarg(ssl_opts, bad_value)}, enats_client:connect(TlsClient)
     ),
     ok = enats_client:stop(TlsClient),
+    {ok, BinaryHostClient} = enats_client:start_link(#{host => <<"127.0.0.1">>, port => 1}),
+    ?assertMatch(
+        {error, #{reason := connection_failed}}, enats_client:connect(BinaryHostClient)
+    ),
+    ?assert(is_process_alive(BinaryHostClient)),
+    ok = enats_client:stop(BinaryHostClient),
+    {ok, BinaryServerClient} = enats_client:start_link(#{servers => [{<<"127.0.0.1">>, 1}]}),
+    ?assertMatch(
+        {error, #{reason := connection_failed}}, enats_client:connect(BinaryServerClient)
+    ),
+    ?assert(is_process_alive(BinaryServerClient)),
+    ok = enats_client:stop(BinaryServerClient),
     {ok, Client} = enats_client:start_link(#{host => "127.0.0.1", port => 1, owner => self()}),
     ?assertEqual(disconnected, enats_client:status(Client)),
     ?assertEqual(#{}, enats_client:info(Client)),
-    ?assertMatch({error, _}, enats_client:connect(Client)),
+    {error, ConnectError} = enats_client:connect(Client),
+    ?assertEqual(ConnectError, maps:get(last_error, enats_client:stats(Client))),
     ok = enats_client:disconnect(Client),
     ok = enats_client:stop(Client),
     ok.

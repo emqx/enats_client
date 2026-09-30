@@ -516,11 +516,16 @@ validate_nonnegative_integer(Name, Value) -> {error, {invalid, Name, {bad_value,
 validate_host(Value) when is_binary(Value), byte_size(Value) > 0 ->
     validate_host_text(Value);
 validate_host(Value) when is_list(Value), Value =/= [] ->
-    try unicode:characters_to_binary(Value) of
-        Binary when is_binary(Binary) -> validate_host_text(Binary);
-        _ -> {error, {invalid, host, {bad_value, Value}}}
-    catch
-        _:_ -> {error, {invalid, host, {bad_value, Value}}}
+    case flat_charlist(Value) of
+        true ->
+            try unicode:characters_to_binary(Value) of
+                Binary when is_binary(Binary) -> validate_host_text(Binary);
+                _ -> {error, {invalid, host, {bad_value, Value}}}
+            catch
+                _:_ -> {error, {invalid, host, {bad_value, Value}}}
+            end;
+        false ->
+            {error, {invalid, host, {bad_value, Value}}}
     end;
 validate_host(Value) ->
     case inet:is_ip_address(Value) of
@@ -533,6 +538,10 @@ validate_host_text(Value) ->
         nomatch -> ok;
         _ -> {error, {invalid, host, {bad_value, Value}}}
     end.
+
+flat_charlist([]) -> true;
+flat_charlist([Codepoint | Rest]) when is_integer(Codepoint) -> flat_charlist(Rest);
+flat_charlist(_) -> false.
 
 validate_port(Value) when is_integer(Value), Value > 0, Value =< 65535 -> ok;
 validate_port(Value) -> {error, {invalid, port, {bad_value, Value}}}.
@@ -568,8 +577,17 @@ validate_tls_handshake(starttls) -> ok;
 validate_tls_handshake(first) -> ok;
 validate_tls_handshake(Value) -> {error, {invalid, tls_handshake, {bad_value, Value}}}.
 
-validate_ssl_opts(Value) when is_list(Value) -> ok;
-validate_ssl_opts(Value) -> {error, {invalid, ssl_opts, {bad_value, Value}}}.
+validate_ssl_opts(Value) when is_list(Value) ->
+    case proper_list(Value) of
+        true -> ok;
+        false -> {error, {invalid, ssl_opts, {bad_value, Value}}}
+    end;
+validate_ssl_opts(Value) ->
+    {error, {invalid, ssl_opts, {bad_value, Value}}}.
+
+proper_list([]) -> true;
+proper_list([_ | Rest]) -> proper_list(Rest);
+proper_list(_) -> false.
 
 validate_owner(Value) when is_pid(Value) -> ok;
 validate_owner(Value) -> {error, {invalid, owner, {bad_value, Value}}}.
