@@ -193,14 +193,30 @@ connection.
 
 ## Errors
 
-Public calls return `{error, Reason}` for invalid arguments, transport and
-TLS failures, protocol errors, timeouts, server errors and JetStream
-rejections. The client process is not terminated by malformed user input.
+Public client calls and authentication helpers return errors as
+`{error, #{reason => Reason, details => Details}}`. `Reason` is one of
+`badarg`, `bad_operation`, `auth_error`, `connection_failed`, `timeout`,
+`protocol_error`, `server_error`, or `internal_error`. Each reason has a
+defined set of detail fields; see `enats_error:error/0`.
 
-Unknown option keys are rejected with
-`{error, {invalid_option, Scope, {unknown_keys, Keys}}}`. This prevents a
-misspelled TLS, reconnect, subscription or diagnostics setting from being
-silently ignored.
+For example, an invalid subject returns
+`{error, #{reason => badarg, details => #{field => subject, code => bad_value}}}`.
+A bad batch item adds `index` to those details. A JetStream 503 response
+returns `server_error` with `source => jetstream`, `code => unavailable`, and
+`status => 503`. Unknown option names are reported in `details.keys` without
+echoing credential values. When a JetStream PubAck includes `err_code`, its
+numeric value is retained in `details.err_code`.
+TLS handshake alerts report `cause => tls_alert` and the alert atom in
+`details.alert`. Invalid TLS options report `badarg` for `ssl_opts`.
+
+An interrupted flush or request may have reached the server. Such errors
+include `outcome => unknown`; callers choose their own retry and deduplication
+policy. Unexpected disconnection notifications and `stats.last_error` carry
+the same error map. Failed dial and handshake attempts remain in
+`stats.last_error` after a later server succeeds. A requested disconnect
+remains a normal event. Local authentication and option errors stop server
+failover; local handshake errors also stop automatic reconnect so the original
+cause remains visible.
 
 ## Tests and development
 

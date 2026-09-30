@@ -142,7 +142,7 @@
     pending_requests := non_neg_integer(),
     pending_flushes := non_neg_integer(),
     diagnostics_enabled := boolean(),
-    last_error => error_reason()
+    last_error => error_reason() | undefined
 }.
 -type metric() ::
     transport_connect_latency
@@ -168,60 +168,7 @@
     counters := #{counter() => non_neg_integer()},
     latencies := #{metric() => latency_summary()}
 }.
--type error_value() ::
-    atom()
-    | binary()
-    | integer()
-    | pid()
-    | reference()
-    | boolean()
-    | undefined
-    | [error_value()]
-    | {error_value(), error_value()}
-    | {error_value(), error_value(), error_value()}
-    | {error_value(), error_value(), error_value(), error_value()}
-    | {error_value(), error_value(), error_value(), error_value(), error_value()}.
--type error_reason() ::
-    invalid_subject
-    | wildcard_subject_not_allowed
-    | invalid_options
-    | invalid_payload
-    | invalid_headers
-    | invalid_argument
-    | invalid_timeout
-    | disconnected
-    | connecting
-    | already_connected
-    | timeout
-    | diagnostics_disabled
-    | draining
-    | not_found
-    | headers_not_supported
-    | tls_not_available
-    | tls_already_established
-    | no_servers_available
-    | closed
-    | stale_connection
-    | requested
-    | {invalid_option, atom()}
-    | {invalid_option, atom(), error_value()}
-    | {invalid_headers, error_value()}
-    | {invalid_batch_message, pos_integer(), error_reason()}
-    | {batch_too_large, messages | bytes, pos_integer(), pos_integer()}
-    | {invalid_header_name, binary()}
-    | {invalid_header_value, binary()}
-    | {invalid_header, error_value()}
-    | {payload_too_large, pos_integer()}
-    | {server_error, binary()}
-    | {transport, error_value()}
-    | {tls_upgrade_failed, error_value()}
-    | {invalid_ssl_options, error_value()}
-    | {protocol, error_value()}
-    | {auth, error_value()}
-    | {no_responders, binary()}
-    | {disconnected, error_value()}
-    | {client_exit, error_value()}
-    | {jetstream, unavailable | rejected | invalid_ack, error_value()}.
+-type error_reason() :: enats_error:error().
 -export_type([
     client/0,
     subject/0,
@@ -257,173 +204,208 @@ child_spec(Options) ->
 
 -spec start_link(options()) -> {ok, client()} | {error, error_reason()}.
 start_link(Options) when is_map(Options) ->
-    case validate_start_options(Options) of
-        ok -> enats_connection:start_link(Options#{owner => maps:get(owner, Options, self())});
-        {error, _} = Error -> Error
-    end;
+    enats_error:wrap(
+        start,
+        case validate_start_options(Options) of
+            ok -> enats_connection:start_link(Options#{owner => maps:get(owner, Options, self())});
+            {error, _} = Error -> Error
+        end
+    );
 start_link(_Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(start, {error, {invalid, options, bad_type}}).
 
 -spec connect(client()) -> ok | {error, error_reason()}.
-connect(Client) -> enats_connection:connect(Client).
+connect(Client) -> enats_error:wrap(connect, enats_connection:connect(Client)).
 
 -spec connect(client(), call_timeout()) -> ok | {error, error_reason()}.
 connect(Client, Timeout) ->
-    case validate_timeout(Timeout) of
-        ok -> enats_connection:connect(Client, Timeout);
-        Error -> Error
-    end.
+    enats_error:wrap(
+        connect,
+        case validate_timeout(Timeout) of
+            ok -> enats_connection:connect(Client, Timeout);
+            Error -> Error
+        end
+    ).
 
 -spec disconnect(client()) -> ok | {error, error_reason()}.
-disconnect(Client) -> enats_connection:disconnect(Client).
+disconnect(Client) -> enats_error:wrap(disconnect, enats_connection:disconnect(Client)).
 
 -spec stop(client()) -> ok | {error, error_reason()}.
-stop(Client) -> enats_connection:stop(Client).
+stop(Client) -> enats_error:wrap(stop, enats_connection:stop(Client)).
 
 -spec status(client()) -> status() | {error, error_reason()}.
-status(Client) -> enats_connection:status(Client).
+status(Client) -> enats_error:wrap(status, enats_connection:status(Client)).
 
 -spec info(client()) -> server_info() | {error, error_reason()}.
-info(Client) -> enats_connection:info(Client).
+info(Client) -> enats_error:wrap(info, enats_connection:info(Client)).
 
 -spec stats(client()) -> stats() | {error, error_reason()}.
-stats(Client) -> enats_connection:stats(Client).
+stats(Client) -> enats_error:wrap(stats, enats_connection:stats(Client)).
 
 -spec publish(client(), subject(), iodata()) -> ok | {error, error_reason()}.
 publish(Client, Subject, Payload) -> publish(Client, Subject, Payload, #{}).
 
 -spec publish(client(), subject(), iodata(), publish_options()) -> ok | {error, error_reason()}.
 publish(Client, Subject, Payload0, Options) when is_map(Options) ->
-    case validate_publish_options(Options, false) of
-        ok ->
-            with_subject(Subject, false, fun() ->
-                with_payload(Payload0, fun(Payload) ->
-                    enats_connection:publish(Client, Subject, Payload, Options)
-                end)
-            end);
-        Error ->
-            Error
-    end;
+    enats_error:wrap(
+        publish,
+        case validate_publish_options(Options, false) of
+            ok ->
+                with_subject(Subject, false, fun() ->
+                    with_payload(Payload0, fun(Payload) ->
+                        enats_connection:publish(Client, Subject, Payload, Options)
+                    end)
+                end);
+            Error ->
+                Error
+        end
+    );
 publish(_Client, _Subject, _Payload, _Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(publish, {error, {invalid, options, bad_type}}).
 
 -spec publish_batch(client(), [batch_message()]) -> ok | {error, error_reason()}.
 publish_batch(Client, Messages) -> publish_batch(Client, Messages, 5000).
 
 -spec publish_batch(client(), [batch_message()], call_timeout()) -> ok | {error, error_reason()}.
 publish_batch(Client, Messages, Timeout) when is_list(Messages) ->
-    case validate_timeout(Timeout) of
-        ok -> enats_connection:publish_batch(Client, Messages, Timeout);
-        Error -> Error
-    end;
+    enats_error:wrap(
+        publish_batch,
+        case validate_timeout(Timeout) of
+            ok -> enats_connection:publish_batch(Client, Messages, Timeout);
+            Error -> Error
+        end
+    );
 publish_batch(_Client, _Messages, _Timeout) ->
-    {error, invalid_options}.
+    enats_error:wrap(publish_batch, {error, {invalid, batch, bad_type}}).
 
 -spec request(client(), subject(), iodata(), publish_options()) ->
     {ok, message()} | {error, error_reason()}.
 request(Client, Subject, Payload0, Options) when is_map(Options) ->
-    case validate_publish_options(Options, false) of
-        ok ->
-            with_subject(Subject, false, fun() ->
-                with_payload(Payload0, fun(Payload) ->
-                    enats_connection:request(Client, Subject, Payload, Options)
-                end)
-            end);
-        Error ->
-            Error
-    end;
+    enats_error:wrap(
+        request,
+        case validate_publish_options(Options, false) of
+            ok ->
+                with_subject(Subject, false, fun() ->
+                    with_payload(Payload0, fun(Payload) ->
+                        enats_connection:request(Client, Subject, Payload, Options)
+                    end)
+                end);
+            Error ->
+                Error
+        end
+    );
 request(_Client, _Subject, _Payload, _Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(request, {error, {invalid, options, bad_type}}).
 
 -spec request(client(), subject(), iodata(), publish_options(), call_timeout()) ->
     {ok, message()} | {error, error_reason()}.
 request(Client, Subject, Payload, Options, Timeout) when is_map(Options) ->
-    case validate_timeout(Timeout) of
-        ok -> request(Client, Subject, Payload, Options#{timeout => Timeout});
-        Error -> Error
-    end;
+    enats_error:wrap(
+        request,
+        case validate_timeout(Timeout) of
+            ok -> request(Client, Subject, Payload, Options#{timeout => Timeout});
+            Error -> Error
+        end
+    );
 request(_Client, _Subject, _Payload, _Options, _Timeout) ->
-    {error, invalid_options}.
+    enats_error:wrap(request, {error, {invalid, options, bad_type}}).
 
 -spec jetstream_publish(client(), subject(), iodata(), publish_options()) ->
     {ok, #{stream := binary(), sequence := integer(), duplicate := boolean()}}
     | {error, error_reason()}.
 jetstream_publish(Client, Subject, Payload, Options) when is_map(Options) ->
-    case validate_publish_options(Options, true) of
-        ok ->
-            Timeout = maps:get(timeout, Options, 5000),
-            Headers0 = maps:get(headers, Options, []),
-            case maps:get(msg_id, Options, undefined) of
-                undefined ->
-                    jetstream_request(Client, Subject, Payload, Headers0, Timeout);
-                MsgId when is_binary(MsgId) ->
-                    jetstream_request(
-                        Client,
-                        Subject,
-                        Payload,
-                        [{<<"Nats-Msg-Id">>, MsgId} | Headers0],
-                        Timeout
-                    );
-                _ ->
-                    {error, {invalid_option, msg_id}}
-            end;
-        Error ->
-            Error
-    end;
+    enats_error:wrap(
+        jetstream_publish,
+        case validate_publish_options(Options, true) of
+            ok ->
+                Timeout = maps:get(timeout, Options, 5000),
+                Headers0 = maps:get(headers, Options, []),
+                case maps:get(msg_id, Options, undefined) of
+                    undefined ->
+                        jetstream_request(Client, Subject, Payload, Headers0, Timeout);
+                    MsgId when is_binary(MsgId) ->
+                        jetstream_request(
+                            Client,
+                            Subject,
+                            Payload,
+                            [{<<"Nats-Msg-Id">>, MsgId} | Headers0],
+                            Timeout
+                        );
+                    _ ->
+                        {error, {invalid, msg_id, bad_type}}
+                end;
+            Error ->
+                Error
+        end
+    );
 jetstream_publish(_Client, _Subject, _Payload, _Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(jetstream_publish, {error, {invalid, options, bad_type}}).
 
 -spec subscribe(client(), subject(), subscribe_options()) ->
     {ok, reference()} | {error, error_reason()}.
 subscribe(Client, Subject, Options) when is_map(Options) ->
-    case validate_subscribe_options(Options) of
-        ok ->
-            with_subject(Subject, true, fun() ->
-                enats_connection:subscribe(Client, Subject, Options)
-            end);
-        Error ->
-            Error
-    end;
+    enats_error:wrap(
+        subscribe,
+        case validate_subscribe_options(Options) of
+            ok ->
+                with_subject(Subject, true, fun() ->
+                    enats_connection:subscribe(Client, Subject, Options)
+                end);
+            Error ->
+                Error
+        end
+    );
 subscribe(_Client, _Subject, _Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(subscribe, {error, {invalid, options, bad_type}}).
 
 -spec unsubscribe(client(), reference()) -> ok | {error, error_reason()}.
 unsubscribe(Client, Subscription) when is_reference(Subscription) ->
-    enats_connection:unsubscribe(Client, Subscription);
+    enats_error:wrap(unsubscribe, enats_connection:unsubscribe(Client, Subscription));
 unsubscribe(_Client, _Subscription) ->
-    {error, invalid_argument}.
+    enats_error:wrap(unsubscribe, {error, {invalid, subscription, bad_type}}).
 
 -spec flush(client(), call_timeout()) -> ok | {error, error_reason()}.
 flush(Client, Timeout) ->
-    case validate_timeout(Timeout) of
-        ok -> enats_connection:flush(Client, Timeout);
-        Error -> Error
-    end.
+    enats_error:wrap(
+        flush,
+        case validate_timeout(Timeout) of
+            ok -> enats_connection:flush(Client, Timeout);
+            Error -> Error
+        end
+    ).
 
 -spec drain(client(), call_timeout()) -> ok | {error, error_reason()}.
 drain(Client, Timeout) ->
-    case validate_timeout(Timeout) of
-        ok -> enats_connection:drain(Client, Timeout);
-        Error -> Error
-    end.
+    enats_error:wrap(
+        drain,
+        case validate_timeout(Timeout) of
+            ok -> enats_connection:drain(Client, Timeout);
+            Error -> Error
+        end
+    ).
 
 -spec enable_diagnostics(client(), diagnostics_options()) -> ok | {error, error_reason()}.
 enable_diagnostics(Client, Options) when is_map(Options) ->
-    case validate_allowed_keys(diagnostics, Options, [message_sample_every]) of
-        ok -> enats_connection:enable_diagnostics(Client, Options);
-        Error -> Error
-    end;
+    enats_error:wrap(
+        enable_diagnostics,
+        case validate_allowed_keys(diagnostics, Options, [message_sample_every]) of
+            ok -> enats_connection:enable_diagnostics(Client, Options);
+            Error -> Error
+        end
+    );
 enable_diagnostics(_Client, _Options) ->
-    {error, invalid_options}.
+    enats_error:wrap(enable_diagnostics, {error, {invalid, options, bad_type}}).
 
 -spec disable_diagnostics(client()) -> ok | {error, error_reason()}.
-disable_diagnostics(Client) -> enats_connection:disable_diagnostics(Client).
+disable_diagnostics(Client) ->
+    enats_error:wrap(disable_diagnostics, enats_connection:disable_diagnostics(Client)).
 
 -spec diagnostics(client()) -> {ok, diagnostics_snapshot()} | {error, error_reason()}.
-diagnostics(Client) -> enats_connection:diagnostics(Client).
+diagnostics(Client) -> enats_error:wrap(diagnostics, enats_connection:diagnostics(Client)).
 
 -spec reset_diagnostics(client()) -> ok | {error, error_reason()}.
-reset_diagnostics(Client) -> enats_connection:reset_diagnostics(Client).
+reset_diagnostics(Client) ->
+    enats_error:wrap(reset_diagnostics, enats_connection:reset_diagnostics(Client)).
 
 validate_start_options(Options) ->
     Checks = [
@@ -451,7 +433,7 @@ validate_start_options(Options) ->
             max_publish_batch_messages,
             max_publish_batch_bytes
         ]),
-        enats_auth:validate(maps:get(auth, Options, none)),
+        validate_auth(maps:get(auth, Options, none)),
         validate_host(maps:get(host, Options, "127.0.0.1")),
         validate_port(maps:get(port, Options, 4222)),
         validate_servers(maps:get(servers, Options, undefined)),
@@ -490,105 +472,128 @@ validate_start_options(Options) ->
 
 validate_timeout(infinity) -> ok;
 validate_timeout(Value) when is_integer(Value), Value >= 0 -> ok;
-validate_timeout(_Value) -> {error, invalid_timeout}.
+validate_timeout(_Value) -> {error, {invalid, timeout, bad_value}}.
+
+validate_auth(Auth) ->
+    case enats_auth:validate(Auth) of
+        ok -> ok;
+        {error, Reason} -> {error, {invalid, auth, Reason}}
+    end.
 
 validate_option_timeout(_Name, infinity) -> ok;
 validate_option_timeout(_Name, Value) when is_integer(Value), Value >= 0 -> ok;
-validate_option_timeout(Name, Value) -> {error, {invalid_option, Name, Value}}.
+validate_option_timeout(Name, Value) -> {error, {invalid, Name, {bad_value, Value}}}.
 
 validate_positive_integer(_Name, Value) when is_integer(Value), Value > 0 -> ok;
-validate_positive_integer(Name, Value) -> {error, {invalid_option, Name, Value}}.
+validate_positive_integer(Name, Value) -> {error, {invalid, Name, {bad_value, Value}}}.
 
 validate_optional_limit(_Name, infinity) -> ok;
 validate_optional_limit(_Name, Value) when is_integer(Value), Value > 0 -> ok;
-validate_optional_limit(Name, Value) -> {error, {invalid_option, Name, Value}}.
+validate_optional_limit(Name, Value) -> {error, {invalid, Name, {bad_value, Value}}}.
 
 validate_attempts(infinity) -> ok;
 validate_attempts(Value) -> validate_positive_integer(max_attempts, Value).
 
 validate_multiplier(Value) when is_integer(Value), Value >= 1 -> ok;
 validate_multiplier(Value) when is_float(Value), Value >= 1.0 -> ok;
-validate_multiplier(Value) -> {error, {invalid_option, multiplier, Value}}.
+validate_multiplier(Value) -> {error, {invalid, multiplier, {bad_value, Value}}}.
 
 validate_jitter(Value) when is_integer(Value), Value >= 0, Value =< 1 -> ok;
 validate_jitter(Value) when is_float(Value), Value >= 0.0, Value =< 1.0 -> ok;
-validate_jitter(Value) -> {error, {invalid_option, jitter, Value}}.
+validate_jitter(Value) -> {error, {invalid, jitter, {bad_value, Value}}}.
 
 validate_delay_range(Options) ->
     Min = maps:get(min_delay, Options, 100),
     Max = maps:get(max_delay, Options, 5000),
     case is_integer(Min) andalso is_integer(Max) andalso Min =< Max of
         true -> ok;
-        false -> {error, {invalid_option, reconnect_delay_range, {Min, Max}}}
+        false -> {error, {invalid, reconnect_delay_range, {Min, Max}}}
     end.
 
 validate_nonnegative_integer(_Name, Value) when is_integer(Value), Value >= 0 -> ok;
-validate_nonnegative_integer(Name, Value) -> {error, {invalid_option, Name, Value}}.
+validate_nonnegative_integer(Name, Value) -> {error, {invalid, Name, {bad_value, Value}}}.
 
 validate_host(Value) when is_binary(Value), byte_size(Value) > 0 ->
     validate_host_text(Value);
 validate_host(Value) when is_list(Value), Value =/= [] ->
-    try unicode:characters_to_binary(Value) of
-        Binary when is_binary(Binary) -> validate_host_text(Binary);
-        _ -> {error, {invalid_option, host, Value}}
-    catch
-        _:_ -> {error, {invalid_option, host, Value}}
+    case flat_charlist(Value) of
+        true ->
+            try unicode:characters_to_binary(Value) of
+                Binary when is_binary(Binary) -> validate_host_text(Binary);
+                _ -> {error, {invalid, host, {bad_value, Value}}}
+            catch
+                _:_ -> {error, {invalid, host, {bad_value, Value}}}
+            end;
+        false ->
+            {error, {invalid, host, {bad_value, Value}}}
     end;
 validate_host(Value) ->
     case inet:is_ip_address(Value) of
         true -> ok;
-        false -> {error, {invalid_option, host, Value}}
+        false -> {error, {invalid, host, {bad_value, Value}}}
     end.
 
 validate_host_text(Value) ->
     case binary:match(Value, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>]) of
         nomatch -> ok;
-        _ -> {error, {invalid_option, host, Value}}
+        _ -> {error, {invalid, host, {bad_value, Value}}}
     end.
 
+flat_charlist([]) -> true;
+flat_charlist([Codepoint | Rest]) when is_integer(Codepoint) -> flat_charlist(Rest);
+flat_charlist(_) -> false.
+
 validate_port(Value) when is_integer(Value), Value > 0, Value =< 65535 -> ok;
-validate_port(Value) -> {error, {invalid_option, port, Value}}.
+validate_port(Value) -> {error, {invalid, port, {bad_value, Value}}}.
 
 validate_servers(undefined) ->
     ok;
 validate_servers(Servers) when is_list(Servers), Servers =/= [] ->
-    case
-        lists:all(
-            fun
-                ({Host, Port}) -> validate_host(Host) =:= ok andalso validate_port(Port) =:= ok;
-                (_) -> false
-            end,
-            Servers
-        )
-    of
+    case valid_servers(Servers) of
         true -> ok;
-        false -> {error, {invalid_option, servers, Servers}}
+        false -> {error, {invalid, servers, {bad_value, Servers}}}
     end;
 validate_servers(Value) ->
-    {error, {invalid_option, servers, Value}}.
+    {error, {invalid, servers, {bad_value, Value}}}.
+
+valid_servers([]) ->
+    true;
+valid_servers([{Host, Port} | Rest]) ->
+    validate_host(Host) =:= ok andalso validate_port(Port) =:= ok andalso valid_servers(Rest);
+valid_servers(_) ->
+    false.
 
 validate_allowed_keys(Scope, Options, AllowedKeys) when is_map(Options) ->
     UnknownKeys = lists:sort([Key || Key <- maps:keys(Options), not lists:member(Key, AllowedKeys)]),
     case UnknownKeys of
         [] -> ok;
-        _ -> {error, {invalid_option, Scope, {unknown_keys, UnknownKeys}}}
+        _ -> {error, {invalid, Scope, {unknown_keys, UnknownKeys}}}
     end.
 
 validate_boolean(_Name, Value) when is_boolean(Value) -> ok;
-validate_boolean(Name, Value) -> {error, {invalid_option, Name, Value}}.
+validate_boolean(Name, Value) -> {error, {invalid, Name, {bad_value, Value}}}.
 
 validate_tls_handshake(starttls) -> ok;
 validate_tls_handshake(first) -> ok;
-validate_tls_handshake(Value) -> {error, {invalid_option, tls_handshake, Value}}.
+validate_tls_handshake(Value) -> {error, {invalid, tls_handshake, {bad_value, Value}}}.
 
-validate_ssl_opts(Value) when is_list(Value) -> ok;
-validate_ssl_opts(Value) -> {error, {invalid_option, ssl_opts, Value}}.
+validate_ssl_opts(Value) when is_list(Value) ->
+    case proper_list(Value) of
+        true -> ok;
+        false -> {error, {invalid, ssl_opts, {bad_value, Value}}}
+    end;
+validate_ssl_opts(Value) ->
+    {error, {invalid, ssl_opts, {bad_value, Value}}}.
+
+proper_list([]) -> true;
+proper_list([_ | Rest]) -> proper_list(Rest);
+proper_list(_) -> false.
 
 validate_owner(Value) when is_pid(Value) -> ok;
-validate_owner(Value) -> {error, {invalid_option, owner, Value}}.
+validate_owner(Value) -> {error, {invalid, owner, {bad_value, Value}}}.
 
 validate_active_n(Value) when is_integer(Value), Value > 0, Value =< 32767 -> ok;
-validate_active_n(Value) -> {error, {invalid_option, socket_active_n, Value}}.
+validate_active_n(Value) -> {error, {invalid, socket_active_n, {bad_value, Value}}}.
 
 validate_reconnect(false) ->
     ok;
@@ -623,7 +628,7 @@ validate_reconnect(Options) when is_map(Options) ->
             Error
     end;
 validate_reconnect(Value) ->
-    {error, {invalid_option, reconnect, Value}}.
+    {error, {invalid, reconnect, {bad_value, Value}}}.
 
 validate_subscribe_options(Options) ->
     case validate_allowed_keys(subscribe, Options, [queue_group, owner]) of
@@ -636,11 +641,11 @@ validate_subscribe_options(Options) ->
                         _ ->
                             case valid_protocol_token(QueueGroup) of
                                 true -> ok;
-                                false -> {error, {invalid_option, queue_group}}
+                                false -> {error, {invalid, queue_group, bad_value}}
                             end
                     end;
-                _ ->
-                    {error, invalid_options}
+                {Owner, _QueueGroup} ->
+                    {error, {invalid, owner, {bad_value, Owner}}}
             end;
         Error ->
             Error
@@ -652,20 +657,20 @@ validate_publish_options(Options, AllowMsgId) ->
             true -> [headers, reply_to, timeout, msg_id];
             false -> [headers, reply_to, timeout]
         end,
-    case lists:all(fun(Key) -> lists:member(Key, Allowed) end, maps:keys(Options)) of
-        false ->
-            {error, invalid_options};
-        true ->
+    case validate_allowed_keys(publish, Options, Allowed) of
+        ok ->
             case validate_option_headers(maps:get(headers, Options, [])) of
                 ok -> validate_option_reply_to(maps:get(reply_to, Options, undefined), Options);
                 Error -> Error
-            end
+            end;
+        Error ->
+            Error
     end.
 
 validate_option_headers(Headers) when is_list(Headers) ->
     enats_frame:validate_headers(Headers);
 validate_option_headers(_Headers) ->
-    {error, {invalid_option, headers}}.
+    {error, {invalid, headers, bad_type}}.
 
 validate_option_reply_to(undefined, Options) ->
     validate_option_timeout(timeout, maps:get(timeout, Options, 5000));
@@ -677,11 +682,11 @@ validate_option_reply_to(ReplyTo, Options) when is_binary(ReplyTo) ->
         }
     of
         {true, ok} -> ok;
-        {false, _} -> {error, {invalid_option, reply_to}};
+        {false, _} -> {error, {invalid, reply_to, bad_value}};
         {_, Error} -> Error
     end;
 validate_option_reply_to(_ReplyTo, _Options) ->
-    {error, {invalid_option, reply_to}}.
+    {error, {invalid, reply_to, bad_type}}.
 
 valid_protocol_token(Value) when is_binary(Value), byte_size(Value) > 0 ->
     binary:match(Value, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>, <<"*">>, <<">">>]) =:=
@@ -693,26 +698,26 @@ with_subject(Subject, AllowWildcard, Fun) when is_binary(Subject), byte_size(Sub
     case binary:match(Subject, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>]) of
         nomatch ->
             case {AllowWildcard, binary:match(Subject, [<<"*">>, <<">">>])} of
-                {false, {_, _}} -> {error, wildcard_subject_not_allowed};
+                {false, {_, _}} -> {error, {invalid, subject, wildcard_not_allowed}};
                 _ -> Fun()
             end;
         _ ->
-            {error, invalid_subject}
+            {error, {invalid, subject, bad_value}}
     end;
 with_subject(_Subject, _AllowWildcard, _Fun) ->
-    {error, invalid_subject}.
+    {error, {invalid, subject, bad_value}}.
 
 with_payload(Payload0, Fun) ->
     case payload_to_binary(Payload0) of
         {ok, Payload} -> Fun(Payload);
-        {error, invalid_payload} = Error -> Error
+        {error, {invalid, payload, bad_value}} = Error -> Error
     end.
 
 payload_to_binary(Payload0) ->
     try iolist_to_binary(Payload0) of
         Payload -> {ok, Payload}
     catch
-        error:badarg -> {error, invalid_payload}
+        error:badarg -> {error, {invalid, payload, bad_value}}
     end.
 
 jetstream_request(Client, Subject, Payload, Headers, Timeout) ->
@@ -731,7 +736,7 @@ jetstream_request(Client, Subject, Payload, Headers, Timeout) ->
                 Status -> classify_status(Status)
             end;
         {error, {no_responders, Status}} ->
-            {error, {jetstream, unavailable, Status}};
+            {error, {jetstream, unavailable, jetstream_status_code(Status)}};
         {error, _} = Error ->
             Error
     end.
@@ -759,13 +764,27 @@ response_status(Headers) ->
         false -> undefined
     end.
 
-classify_status(<<"5", _/binary>> = Status) -> {error, {jetstream, unavailable, Status}};
-classify_status(Status) -> {error, {jetstream, rejected, Status}}.
+classify_status(<<"5", _/binary>> = Status) ->
+    {error, {jetstream, unavailable, jetstream_status_code(Status)}};
+classify_status(Status) ->
+    {error, {jetstream, rejected, jetstream_status_code(Status)}}.
+
+jetstream_status_code(<<Hundreds, Tens, Ones>> = Status) when
+    Hundreds >= $0,
+    Hundreds =< $9,
+    Tens >= $0,
+    Tens =< $9,
+    Ones >= $0,
+    Ones =< $9
+->
+    binary_to_integer(Status);
+jetstream_status_code(Status) ->
+    Status.
 
 decode_pub_ack(Payload) ->
     try jiffy:decode(Payload, [return_maps]) of
         #{<<"error">> := Error} ->
-            classify_error(Error);
+            classify_pub_ack_error(Error);
         #{<<"stream">> := Stream, <<"seq">> := Sequence} = Ack ->
             {ok, #{
                 stream => Stream,
@@ -778,7 +797,17 @@ decode_pub_ack(Payload) ->
         _:_ -> {error, {jetstream, invalid_ack, invalid_payload}}
     end.
 
-classify_error(#{<<"code">> := Code}) when is_integer(Code), Code >= 500 ->
-    {error, {jetstream, unavailable, Code}};
-classify_error(_Error) ->
+classify_pub_ack_error(#{<<"code">> := Code} = Error) when is_integer(Code), Code >= 0 ->
+    Kind =
+        case Code >= 500 of
+            true -> unavailable;
+            false -> rejected
+        end,
+    case maps:get(<<"err_code">>, Error, undefined) of
+        ErrCode when is_integer(ErrCode), ErrCode >= 0 ->
+            {error, {jetstream, Kind, Code, ErrCode}};
+        _ ->
+            {error, {jetstream, Kind, Code}}
+    end;
+classify_pub_ack_error(_Error) ->
     {error, {jetstream, rejected, invalid_payload}}.

@@ -56,9 +56,10 @@
     {keep_state, state(), [action()]}
     | {next_state, atom(), state(), [action()]}
     | {keep_state_and_data, action()}.
--type error_result() :: ok | {error, enats_client:error_reason()}.
+-type raw_error_reason() :: atom() | tuple() | enats_error:error().
+-type error_result() :: ok | {error, raw_error_reason()}.
 
--spec start_link(enats_client:options()) -> {ok, pid()} | {error, enats_client:error_reason()}.
+-spec start_link(enats_client:options()) -> {ok, pid()} | {error, raw_error_reason()}.
 
 start_link(Options) ->
     case validate_options(Options) of
@@ -72,19 +73,21 @@ connect(Pid, Timeout) -> safe_call(Pid, {connect, Timeout}, Timeout).
 -spec disconnect(pid()) -> error_result().
 disconnect(Pid) -> safe_call(Pid, disconnect, ?TIMEOUT).
 -spec stop(pid()) -> error_result().
-stop(Pid) ->
+stop(Pid) when is_pid(Pid) ->
     try gen_statem:stop(Pid) of
         ok -> ok
     catch
         exit:noproc -> ok;
         exit:{noproc, _} -> ok;
         exit:Reason -> {error, {client_exit, Reason}}
-    end.
--spec status(pid()) -> enats_client:status() | {error, enats_client:error_reason()}.
+    end;
+stop(_Pid) ->
+    {error, {invalid, client, bad_type}}.
+-spec status(pid()) -> enats_client:status() | {error, raw_error_reason()}.
 status(Pid) -> safe_call(Pid, status, ?TIMEOUT).
--spec info(pid()) -> enats_client:server_info() | {error, enats_client:error_reason()}.
+-spec info(pid()) -> enats_client:server_info() | {error, raw_error_reason()}.
 info(Pid) -> safe_call(Pid, info, ?TIMEOUT).
--spec stats(pid()) -> enats_client:stats() | {error, enats_client:error_reason()}.
+-spec stats(pid()) -> enats_client:stats() | {error, raw_error_reason()}.
 stats(Pid) -> safe_call(Pid, stats, ?TIMEOUT).
 -spec publish(
     pid(), binary(), binary(), enats_client:publish_options()
@@ -99,11 +102,11 @@ publish(Pid, Subject, Payload, Options) ->
 publish_batch(Pid, Messages, Timeout) ->
     safe_call(Pid, {publish_batch, Messages}, Timeout).
 -spec request(pid(), binary(), binary(), enats_client:connection_request_options()) ->
-    {ok, enats_client:message()} | {error, enats_client:error_reason()}.
+    {ok, enats_client:message()} | {error, raw_error_reason()}.
 request(Pid, Subject, Payload, Options) ->
     safe_call(Pid, {request, Subject, Payload, Options}, maps:get(timeout, Options, ?TIMEOUT)).
 -spec subscribe(pid(), binary(), enats_client:subscribe_options()) ->
-    {ok, reference()} | {error, enats_client:error_reason()}.
+    {ok, reference()} | {error, raw_error_reason()}.
 subscribe(Pid, Subject, Options) -> safe_call(Pid, {subscribe, Subject, Options}, ?TIMEOUT).
 -spec unsubscribe(pid(), reference()) -> error_result().
 unsubscribe(Pid, Ref) -> safe_call(Pid, {unsubscribe, Ref}, ?TIMEOUT).
@@ -116,12 +119,12 @@ enable_diagnostics(Pid, Options) -> safe_call(Pid, {enable_diagnostics, Options}
 -spec disable_diagnostics(pid()) -> error_result().
 disable_diagnostics(Pid) -> safe_call(Pid, disable_diagnostics, ?TIMEOUT).
 -spec diagnostics(pid()) ->
-    {ok, enats_client:diagnostics_snapshot()} | {error, enats_client:error_reason()}.
+    {ok, enats_client:diagnostics_snapshot()} | {error, raw_error_reason()}.
 diagnostics(Pid) -> safe_call(Pid, diagnostics, ?TIMEOUT).
 -spec reset_diagnostics(pid()) -> error_result().
 reset_diagnostics(Pid) -> safe_call(Pid, reset_diagnostics, ?TIMEOUT).
 
-safe_call(Pid, Request, Timeout) ->
+safe_call(Pid, Request, Timeout) when is_pid(Pid) ->
     CallTimeout =
         case Timeout of
             infinity -> infinity;
@@ -133,7 +136,9 @@ safe_call(Pid, Request, Timeout) ->
         exit:{timeout, _} -> {error, timeout};
         exit:{noproc, _} -> {error, disconnected};
         exit:Reason -> {error, {client_exit, Reason}}
-    end.
+    end;
+safe_call(_Pid, _Request, _Timeout) ->
+    {error, {invalid, client, bad_type}}.
 
 -spec callback_mode() -> state_functions.
 callback_mode() -> state_functions.
@@ -227,7 +232,8 @@ connect_call(From, Timeout, State) ->
                     {state_timeout, attempt_timeout(State1), connect_timeout}
                 ]};
         {error, Reason, State1} ->
-            {keep_state, clear_pending_connect(State1), reply_action(From, {error, Reason})}
+            FailedState = State1#{last_error => enats_error:normalize(connect, Reason)},
+            {keep_state, clear_pending_connect(FailedState), reply_action(From, {error, Reason})}
     end.
 
 -spec waiting_info(value(), value(), state()) -> state_result().
@@ -243,6 +249,8 @@ waiting_info(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     connect_failed(waiting_info, closed, State);
 waiting_info(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     connect_failed(waiting_info, closed, State);
+waiting_info(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    connect_failed(waiting_info, {transport, Reason}, State);
 waiting_info(state_timeout, connect_timeout, State) ->
     connect_failed(waiting_info, timeout, State);
 waiting_info({call, From}, status, _State) ->
@@ -276,6 +284,8 @@ waiting_pong(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     connect_failed(waiting_pong, closed, State);
 waiting_pong(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     connect_failed(waiting_pong, closed, State);
+waiting_pong(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    connect_failed(waiting_pong, {transport, Reason}, State);
 waiting_pong(state_timeout, connect_timeout, State) ->
     connect_failed(waiting_pong, timeout, State);
 waiting_pong({call, From}, status, _State) ->
@@ -332,7 +342,7 @@ connected({call, From}, {publish, Subject, Payload0, Options}, State) ->
                     reply(From, {error, Reason})
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {publish_batch, Messages}, State) ->
     case prepare_batch(Messages, State) of
@@ -404,7 +414,7 @@ connected({call, From}, {request, Subject, Payload0, Options}, State) ->
                     reply(From, {error, Reason})
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {subscribe, Subject, Options}, State) ->
     case validate_subject(Subject, true) of
@@ -439,7 +449,7 @@ connected({call, From}, {subscribe, Subject, Options}, State) ->
                     lost_with_reply(From, Reason, State)
             end;
         {error, Reason} ->
-            reply(From, {error, {invalid_subject, Reason}})
+            reply(From, {error, Reason})
     end;
 connected({call, From}, {unsubscribe, Ref}, State) ->
     case maps:take(Ref, maps:get(subscriptions, State)) of
@@ -493,6 +503,8 @@ connected(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     lost(connected, closed, State);
 connected(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     lost(connected, closed, State);
+connected(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    lost(connected, {transport, Reason}, State);
 connected(info, {request_timeout, Sid}, State) ->
     request_timeout(Sid, State);
 connected(info, {'DOWN', Monitor, process, _Owner, _Reason}, State) ->
@@ -526,6 +538,8 @@ draining(info, {tcp_closed, Socket}, #{socket := {tcp, Socket}} = State) ->
     drain_failed(closed, State);
 draining(info, {ssl_closed, Socket}, #{socket := {ssl, Socket}} = State) ->
     drain_failed(closed, State);
+draining(info, {ssl_error, Socket, Reason}, #{socket := {ssl, Socket}} = State) ->
+    drain_failed({transport, Reason}, State);
 draining(info, {flush_timeout, Ref}, State) ->
     State1 = expire_flush(Ref, State),
     close(State1),
@@ -699,13 +713,20 @@ reconnecting(state_timeout, reconnect, State) ->
                         [
                             {state_timeout, attempt_timeout(State1), connect_timeout}
                         ]};
-                {error, _Reason, State1} ->
-                    NextState = State1#{
-                        reconnect_attempt => maps:get(reconnect_attempt, State1, 0) + 1
-                    },
-                    {keep_state, NextState, [
-                        {state_timeout, reconnect_delay(NextState), reconnect}
-                    ]}
+                {error, Reason, State1} ->
+                    FailedState = State1#{last_error => enats_error:normalize(connect, Reason)},
+                    case local_connect_error(Reason) of
+                        true ->
+                            notify(FailedState, disconnected, maps:get(last_error, FailedState)),
+                            {next_state, disconnected, clear_socket(FailedState), []};
+                        false ->
+                            NextState = FailedState#{
+                                reconnect_attempt => maps:get(reconnect_attempt, FailedState, 0) + 1
+                            },
+                            {keep_state, NextState, [
+                                {state_timeout, reconnect_delay(NextState), reconnect}
+                            ]}
+                    end
             end
     end;
 reconnecting({call, From}, status, _State) ->
@@ -871,35 +892,52 @@ process_connect_info(Info, Base, State) ->
                     connect_failed(waiting_info, {transport, Reason}, State)
             end;
         {error, Reason} ->
-            connect_failed(waiting_info, Reason, State)
+            connect_failed(waiting_info, {invalid, auth, Reason}, State)
     end.
 
 connect_failed(
-    StateName, _Reason, #{connect_from := From, connect_attempts := Attempts} = State
+    StateName, Reason, #{connect_from := From, connect_attempts := Attempts} = State
 ) when
     From =/= undefined, Attempts > 0
 ->
-    close(State),
-    Timeout = attempt_timeout(State),
-    State0 = reset_transport(State),
-    case
-        open_socket(State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout)
-    of
-        {ok, Socket, State1} ->
-            {next_state, waiting_info,
-                State1#{
-                    socket => Socket,
-                    connect_attempts => Attempts - 1,
-                    parse_state => parser_state(maps:get(options, State1))
-                },
-                [
-                    {state_timeout, attempt_timeout(State1), connect_timeout}
-                ]};
-        {error, NextReason, State1} ->
-            lost(StateName, NextReason, State1)
+    case local_connect_error(Reason) of
+        true ->
+            lost(StateName, Reason, State);
+        false ->
+            close(State),
+            Timeout = attempt_timeout(State),
+            FailedState = State#{last_error => enats_error:normalize(connect, Reason)},
+            State0 = reset_transport(FailedState),
+            case
+                open_socket(
+                    State0, length(maps:get(servers, State0)), maps:get(options, State0), Timeout
+                )
+            of
+                {ok, Socket, State1} ->
+                    {next_state, waiting_info,
+                        State1#{
+                            socket => Socket,
+                            connect_attempts => Attempts - 1,
+                            parse_state => parser_state(maps:get(options, State1))
+                        },
+                        [{state_timeout, attempt_timeout(State1), connect_timeout}]};
+                {error, NextReason, State1} ->
+                    lost(StateName, NextReason, State1)
+            end
     end;
 connect_failed(StateName, Reason, State) ->
     lost(StateName, Reason, State).
+
+local_connect_error({invalid, auth, Error}) ->
+    local_connect_error(Error);
+local_connect_error({invalid, _Field, _Details}) ->
+    true;
+local_connect_error({tls_upgrade_failed, Reason}) ->
+    local_connect_error(Reason);
+local_connect_error(#{reason := Reason}) when Reason =:= badarg; Reason =:= auth_error ->
+    true;
+local_connect_error(_) ->
+    false.
 
 open_socket(State) ->
     Options = maps:get(options, State),
@@ -918,7 +956,7 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
         State#{server_index => NextIndex, current_server => {Host, Port}}
     ),
     TransportStartedAt = diagnostic_now(State1),
-    case open_transport(Host, Port, Options, Timeout) of
+    case open_transport(socket_host(Host), Port, Options, Timeout) of
         {ok, Socket} ->
             State2 = record_latency(
                 transport_connect_latency,
@@ -926,14 +964,20 @@ open_socket(State, Attempts, Options, Timeout) when Timeout > 0; Timeout =:= inf
                 State1
             ),
             {ok, Socket, State2#{nats_started_at => diagnostic_now(State2)}};
-        {error, _Reason} when Attempts > 1 ->
-            FailedState = record_counter(connect_failures, State1),
-            open_socket(
-                FailedState,
-                Attempts - 1,
-                Options,
-                remaining_timeout(maps:get(connect_deadline, State1, infinity))
-            );
+        {error, Reason} when Attempts > 1 ->
+            FailedState0 = record_counter(connect_failures, State1),
+            FailedState = FailedState0#{last_error => enats_error:normalize(connect, Reason)},
+            case local_connect_error(Reason) of
+                true ->
+                    {error, Reason, FailedState};
+                false ->
+                    open_socket(
+                        FailedState,
+                        Attempts - 1,
+                        Options,
+                        remaining_timeout(maps:get(connect_deadline, State1, infinity))
+                    )
+            end;
         {error, Reason} ->
             {error, Reason, record_counter(connect_failures, State1)}
     end;
@@ -981,10 +1025,19 @@ open_transport(Host, Port, #{socket_active_n := ActiveN}, Timeout) ->
 
 safe_ssl_connect(Host, Port, Options, Timeout) ->
     try ssl:connect(Host, Port, Options, Timeout) of
-        Result -> Result
+        Result -> classify_ssl_result(Result)
     catch
-        error:Reason -> {error, {invalid_ssl_options, Reason}}
+        error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
+
+classify_ssl_result({error, Reason}) when
+    is_tuple(Reason),
+    tuple_size(Reason) >= 2,
+    (element(1, Reason) =:= options orelse element(1, Reason) =:= badarg)
+->
+    {error, {invalid, ssl_opts, bad_value}};
+classify_ssl_result(Result) ->
+    Result.
 
 ssl_result({ok, Socket}) -> {ok, {ssl, Socket}};
 ssl_result(Error) -> Error.
@@ -1022,9 +1075,9 @@ maybe_upgrade_tls(Info, #{options := Options} = State) ->
 
 safe_ssl_upgrade(Socket, Options, Timeout) ->
     try ssl:connect(Socket, Options, Timeout) of
-        Result -> Result
+        Result -> classify_ssl_result(Result)
     catch
-        error:Reason -> {error, {invalid_ssl_options, Reason}}
+        error:Reason -> {error, {invalid, ssl_opts, Reason}}
     end.
 
 send_frame({connect, Params}, #{socket := Socket}) ->
@@ -1072,7 +1125,7 @@ prepare_batch([], _State, _MaxMessages, _MaxBytes, _Index, Count, _Bytes, Acc) -
 prepare_batch(
     _Messages, _State, MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc
 ) when is_integer(MaxMessages), Index > MaxMessages ->
-    {error, {batch_too_large, messages, Index, MaxMessages}};
+    {error, {invalid, batch, {too_large, messages, Index, MaxMessages}}};
 prepare_batch(
     [Message | Rest], State, MaxMessages, MaxBytes, Index, Count, Bytes, Acc
 ) ->
@@ -1095,13 +1148,13 @@ prepare_batch(
                         [WireFrame | Acc]
                     );
                 false ->
-                    {error, {batch_too_large, bytes, NewBytes, MaxBytes}}
+                    {error, {invalid, batch, {too_large, bytes, NewBytes, MaxBytes}}}
             end;
         {error, Reason} ->
-            {error, {invalid_batch_message, Index, Reason}}
+            {error, {invalid, batch_message, {Index, Reason}}}
     end;
 prepare_batch(_Messages, _State, _MaxMessages, _MaxBytes, Index, _Count, _Bytes, _Acc) ->
-    {error, {invalid_batch_message, Index, invalid_options}}.
+    {error, {invalid, batch_message, {Index, {invalid, options, bad_type}}}}.
 
 prepare_batch_message(Message, State, _Index) when is_map(Message) ->
     case validate_batch_message_keys(Message) of
@@ -1118,18 +1171,18 @@ prepare_batch_message(Message, State, _Index) when is_map(Message) ->
                                 {error, Reason} -> {error, Reason}
                             end
                     catch
-                        error:badarg -> {error, invalid_payload}
+                        error:badarg -> {error, {invalid, payload, bad_value}}
                     end;
                 {error, Reason} ->
-                    {error, {invalid_subject, Reason}}
+                    {error, Reason}
             end;
         ok ->
-            {error, invalid_options};
+            {error, {invalid, options, bad_type}};
         {error, Reason} ->
             {error, Reason}
     end;
 prepare_batch_message(_Message, _State, _Index) ->
-    {error, invalid_options}.
+    {error, {invalid, options, bad_type}}.
 
 validate_batch_message_keys(Message) ->
     UnknownKeys = lists:sort([
@@ -1138,7 +1191,7 @@ validate_batch_message_keys(Message) ->
     ]),
     case UnknownKeys of
         [] -> ok;
-        _ -> {error, {invalid_option, batch_message, {unknown_keys, UnknownKeys}}}
+        _ -> {error, {invalid, batch_message, {unknown_keys, UnknownKeys}}}
     end.
 
 within_batch_limit(_Value, infinity) ->
@@ -1177,7 +1230,7 @@ validate_publish_options(Payload, Options, State) ->
     Headers = maps:get(headers, Options, []),
     case Headers =/= [] andalso maps:get(headers, Info, true) =:= false of
         true ->
-            {error, headers_not_supported};
+            {error, {invalid, headers, unsupported}};
         false ->
             case enats_frame:validate_headers(Headers) of
                 {error, _} = Error ->
@@ -1185,7 +1238,7 @@ validate_publish_options(Payload, Options, State) ->
                 ok ->
                     MessageSize = byte_size(Payload) + enats_frame:headers_size(Headers),
                     case is_integer(MaxPayload) andalso MessageSize > MaxPayload of
-                        true -> {error, {payload_too_large, MaxPayload}};
+                        true -> {error, {invalid, payload, {too_large, MaxPayload}}};
                         false -> ok
                     end
             end
@@ -1351,20 +1404,26 @@ maybe_unsubscribe(Sid, State) ->
     ok.
 
 drain_failed(Reason, State) ->
-    close(State),
-    reply_flushes(State, {error, {disconnected, Reason}}),
-    reply_requests(State, {error, {disconnected, Reason}}),
-    notify(State, disconnected, Reason),
-    {next_state, disconnected, clear_socket(clear_subscriptions(State)), []}.
+    State1 = State#{last_error => enats_error:normalize(drain, Reason)},
+    close(State1),
+    reply_flushes(State1, {error, {disconnected, Reason}}),
+    reply_requests(State1, {error, {disconnected, Reason}}),
+    notify(State1, disconnected, maps:get(last_error, State1)),
+    {next_state, disconnected, clear_socket(clear_subscriptions(State1)), []}.
 
 lost(_StateName, Reason, State) ->
-    State0 = record_counter(error_counter(Reason), State#{last_error => Reason}),
+    State0 = record_counter(error_counter(Reason), State#{
+        last_error => enats_error:normalize(connection, Reason)
+    }),
     close(State0),
     reply_connect(State0, {error, Reason}),
     reply_flushes(State0, {error, {disconnected, Reason}}),
     reply_requests(State0, {error, {disconnected, Reason}}),
     notify(State0, disconnected, Reason),
-    case reconnect_enabled(maps:get(reconnect, maps:get(options, State0))) of
+    case
+        reconnect_enabled(maps:get(reconnect, maps:get(options, State0))) andalso
+            not local_connect_error(Reason)
+    of
         false ->
             {next_state, disconnected, clear_socket(State0), []};
         true ->
@@ -1413,9 +1472,14 @@ cancel_request_timer(Timer) ->
 notify(State, Event, Data) ->
     Options = maps:get(options, State),
     case maps:get(notify, Options, true) of
-        true -> maps:get(owner, Options) ! {enats_client, self(), Event, Data};
+        true -> maps:get(owner, Options) ! {enats_client, self(), Event, event_data(Event, Data)};
         false -> ok
     end.
+
+event_data(disconnected, requested) -> requested;
+event_data(disconnected, Reason) -> enats_error:normalize(connection, Reason);
+event_data(reconnect_exhausted, Reason) -> enats_error:normalize(connect, Reason);
+event_data(_Event, Data) -> Data.
 reply(From, Value) -> {keep_state_and_data, {reply, From, Value}}.
 reply_action(From, Value) -> [{reply, From, Value}].
 keep(State) -> {keep_state, State, []}.
@@ -1468,15 +1532,15 @@ validate_options(Options) when is_map(Options) ->
     case maps:get(tls_handshake, Options, starttls) of
         starttls -> validate_ssl_option_container(Options);
         first -> validate_ssl_option_container(Options);
-        Value -> {error, {invalid_option, tls_handshake, Value}}
+        Value -> {error, {invalid, tls_handshake, {bad_value, Value}}}
     end;
 validate_options(Options) ->
-    {error, {invalid_options, Options}}.
+    {error, {invalid, options, {bad_value, Options}}}.
 
 validate_ssl_option_container(Options) ->
     case maps:get(ssl_opts, Options, []) of
         SslOpts when is_list(SslOpts) -> validate_heartbeat_options(Options);
-        SslOpts -> {error, {invalid_option, ssl_opts, SslOpts}}
+        SslOpts -> {error, {invalid, ssl_opts, {bad_value, SslOpts}}}
     end.
 
 validate_heartbeat_options(Options) ->
@@ -1484,16 +1548,16 @@ validate_heartbeat_options(Options) ->
     MaxPingsOut = maps:get(max_pings_out, Options, 2),
     case is_integer(PingInterval) andalso PingInterval >= 0 of
         false ->
-            {error, {invalid_option, ping_interval, PingInterval}};
+            {error, {invalid, ping_interval, {bad_value, PingInterval}}};
         true ->
             case is_integer(MaxPingsOut) andalso MaxPingsOut > 0 of
                 false ->
-                    {error, {invalid_option, max_pings_out, MaxPingsOut}};
+                    {error, {invalid, max_pings_out, {bad_value, MaxPingsOut}}};
                 true ->
                     ActiveN = maps:get(socket_active_n, Options, 100),
                     case is_integer(ActiveN) andalso ActiveN > 0 andalso ActiveN =< 32767 of
                         true -> validate_parser_limits(Options);
-                        false -> {error, {invalid_option, socket_active_n, ActiveN}}
+                        false -> {error, {invalid, socket_active_n, {bad_value, ActiveN}}}
                     end
             end
     end.
@@ -1511,7 +1575,7 @@ validate_parser_limits(Options) ->
         )
     of
         [] -> ok;
-        [{Name, Value} | _] -> {error, {invalid_option, Name, Value}}
+        [{Name, Value} | _] -> {error, {invalid, Name, {bad_value, Value}}}
     end.
 
 normalize_options(Options) ->
@@ -1724,7 +1788,7 @@ diagnostic_call(From, enable, Options, State) when is_map(Options) ->
             {keep_state, State#{diagnostics => diagnostics_enabled(Options)},
                 reply_action(From, ok)};
         false ->
-            reply(From, {error, {invalid_option, message_sample_every, SampleEvery}})
+            reply(From, {error, {invalid, message_sample_every, {bad_value, SampleEvery}}})
     end;
 diagnostic_call(From, disable, _Options, State) ->
     {keep_state, State#{diagnostics => diagnostics_disabled()}, reply_action(From, ok)};
@@ -1930,10 +1994,15 @@ transport_options(Host, Options) when is_tuple(Host), tuple_size(Host) =:= 8 ->
 transport_options(_Host, Options) ->
     Options.
 
+socket_host(Host) when is_binary(Host) ->
+    binary_to_list(Host);
+socket_host(Host) ->
+    Host.
+
 tls_server_name(Host) when is_tuple(Host) ->
     inet:ntoa(Host);
 tls_server_name(Host) ->
-    Host.
+    socket_host(Host).
 
 unique_servers(Servers) ->
     lists:reverse(
@@ -1953,11 +2022,11 @@ validate_subject(Subject, AllowWildcard) when is_binary(Subject), byte_size(Subj
     case binary:match(Subject, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>, <<0>>]) of
         nomatch ->
             case {AllowWildcard, binary:match(Subject, [<<"*">>, <<">">>])} of
-                {false, {_, _}} -> {error, wildcard_subject_not_allowed};
+                {false, {_, _}} -> {error, {invalid, subject, wildcard_not_allowed}};
                 _ -> ok
             end;
         _ ->
-            {error, invalid_subject}
+            {error, {invalid, subject, bad_value}}
     end;
 validate_subject(_Subject, _AllowWildcard) ->
-    {error, invalid_subject}.
+    {error, {invalid, subject, bad_value}}.

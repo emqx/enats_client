@@ -17,7 +17,7 @@
     redact/1
 ]).
 
--type secret_provider(T) :: T | fun(() -> T | {ok, T} | {error, auth_error()}).
+-type secret_provider(T) :: T | fun(() -> T | {ok, T} | {error, term()}).
 -type auth() ::
     none
     | #{mechanism := user_password, username := binary(), password := secret_provider(binary())}
@@ -31,16 +31,7 @@
         public_key := binary(),
         sign_fun := fun((binary()) -> binary())
     }.
--type auth_error() ::
-    invalid_secret_type
-    | invalid_credentials_type
-    | invalid_credentials
-    | invalid_nkey_seed
-    | nkey_nonce_missing
-    | secret_provider_failed
-    | {credentials_file, file:posix()}
-    | {nkey_sign_failed, auth_error()}
-    | {invalid_nkey_signature, binary()}.
+-type auth_error() :: enats_error:error().
 -type json_value() ::
     null
     | boolean()
@@ -63,15 +54,29 @@
 
 -spec connect_params(auth(), connect_map(), connect_map()) ->
     {ok, connect_map()} | {error, auth_error()}.
-connect_params(none, _Info, Base) ->
+connect_params(Auth, Info, Base) ->
+    enats_error:wrap(
+        authentication,
+        case {is_map(Info), is_map(Base)} of
+            {true, true} ->
+                case validate_raw(Auth) of
+                    ok -> connect_params_raw(Auth, Info, Base);
+                    Error -> Error
+                end;
+            _ ->
+                {error, {invalid, options, bad_type}}
+        end
+    ).
+
+connect_params_raw(none, _Info, Base) ->
     {ok, Base};
-connect_params(
+connect_params_raw(
     #{mechanism := user_password, username := Username, password := Password}, _Info, Base
 ) ->
     with_secret(Password, fun(Value) -> {ok, Base#{user => Username, pass => Value}} end);
-connect_params(#{mechanism := token, token := Token}, _Info, Base) ->
+connect_params_raw(#{mechanism := token, token := Token}, _Info, Base) ->
     with_secret(Token, fun(Value) -> {ok, Base#{auth_token => Value}} end);
-connect_params(#{mechanism := nkey_seed, seed := Seed}, Info, Base) ->
+connect_params_raw(#{mechanism := nkey_seed, seed := Seed}, Info, Base) ->
     case maps:get(nonce, Info, undefined) of
         undefined ->
             {error, nkey_nonce_missing};
@@ -85,11 +90,11 @@ connect_params(#{mechanism := nkey_seed, seed := Seed}, Info, Base) ->
                 end
             end)
     end;
-connect_params(#{mechanism := credentials, provider := Provider}, Info, Base) ->
+connect_params_raw(#{mechanism := credentials, provider := Provider}, Info, Base) ->
     with_secret(Provider, fun(Contents) -> credentials_connect_params(Contents, Info, Base) end);
-connect_params(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}, Info, Base) ->
+connect_params_raw(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}, Info, Base) ->
     signed_connect_params(PublicKey, SignFun, Info, Base);
-connect_params(
+connect_params_raw(
     #{mechanism := jwt, jwt := JWT, public_key := PublicKey, sign_fun := SignFun}, Info, Base
 ) ->
     case signed_connect_params(PublicKey, SignFun, Info, Base) of
@@ -98,34 +103,33 @@ connect_params(
     end.
 
 -spec validate(auth()) -> ok | {error, auth_error()}.
-validate(none) ->
+validate(Auth) -> enats_error:wrap(authentication, validate_raw(Auth)).
+
+validate_raw(none) ->
     ok;
-validate(#{mechanism := user_password, username := Username, password := Password}) when
-    is_binary(Username), (is_binary(Password) orelse is_function(Password, 0))
+validate_raw(#{mechanism := user_password, username := Username, password := Password}) when
+    is_binary(Username)
 ->
-    ok;
-validate(#{mechanism := token, token := Token}) when
-    is_binary(Token); is_function(Token, 0)
-->
-    ok;
-validate(#{mechanism := nkey_seed, seed := Seed}) when
-    is_binary(Seed); is_function(Seed, 0)
-->
-    ok;
-validate(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}) when
+    validate_secret_provider(Password);
+validate_raw(#{mechanism := token, token := Token}) ->
+    validate_secret_provider(Token);
+validate_raw(#{mechanism := nkey_seed, seed := Seed}) ->
+    validate_secret_provider(Seed);
+validate_raw(#{mechanism := nkey, public_key := PublicKey, sign_fun := SignFun}) when
     is_binary(PublicKey), is_function(SignFun, 1)
 ->
     ok;
-validate(#{mechanism := credentials, provider := Provider}) when
-    is_binary(Provider); is_function(Provider, 0)
+validate_raw(#{mechanism := credentials, provider := Provider}) ->
+    validate_secret_provider(Provider);
+validate_raw(#{mechanism := jwt, jwt := JWT, public_key := PublicKey, sign_fun := SignFun}) when
+    is_binary(PublicKey), is_function(SignFun, 1)
 ->
-    ok;
-validate(#{mechanism := jwt, jwt := JWT, public_key := PublicKey, sign_fun := SignFun}) when
-    (is_binary(JWT) orelse is_function(JWT, 0)), is_binary(PublicKey), is_function(SignFun, 1)
-->
-    ok;
-validate(_Auth) ->
+    validate_secret_provider(JWT);
+validate_raw(_Auth) ->
     {error, invalid_credentials}.
+
+validate_secret_provider(Value) when is_binary(Value); is_function(Value, 0) -> ok;
+validate_secret_provider(_Value) -> {error, invalid_secret_type}.
 
 -spec describe(auth()) -> atom().
 describe(none) -> none;
@@ -133,20 +137,41 @@ describe(#{mechanism := Mechanism}) -> Mechanism.
 
 -spec credentials_file(binary() | string()) -> {ok, auth()} | {error, auth_error()}.
 credentials_file(Filename) when is_binary(Filename); is_list(Filename) ->
-    case validate_credentials_file(Filename) of
-        ok -> {ok, #{mechanism => credentials, provider => fun() -> file:read_file(Filename) end}};
-        {error, Reason} -> {error, Reason}
-    end.
+    enats_error:wrap(
+        credentials_file,
+        case validate_credentials_file(Filename) of
+            ok ->
+                Provider = fun() ->
+                    case file:read_file(Filename) of
+                        {ok, Contents} -> {ok, Contents};
+                        {error, Reason} -> {error, {credentials_file, Reason}}
+                    end
+                end,
+                {ok, #{mechanism => credentials, provider => Provider}};
+            {error, Reason} ->
+                {error, Reason}
+        end
+    );
+credentials_file(_Filename) ->
+    enats_error:wrap(credentials_file, {error, invalid_credentials_type}).
 
 -spec credentials(binary()) -> {ok, auth()} | {error, auth_error()}.
 credentials(Contents) when is_binary(Contents) ->
-    case validate_credentials(Contents) of
-        ok -> {ok, #{mechanism => credentials, provider => fun() -> {ok, Contents} end}};
-        {error, Reason} -> {error, Reason}
-    end.
+    enats_error:wrap(
+        credentials,
+        case validate_credentials(Contents) of
+            ok -> {ok, #{mechanism => credentials, provider => fun() -> {ok, Contents} end}};
+            {error, Reason} -> {error, Reason}
+        end
+    );
+credentials(_Contents) ->
+    enats_error:wrap(credentials, {error, invalid_credentials_type}).
 
 -spec validate_credentials(binary()) -> ok | {error, auth_error()}.
-validate_credentials(Contents) when is_binary(Contents) ->
+validate_credentials(Contents) ->
+    enats_error:wrap(validate_credentials, validate_credentials_raw(Contents)).
+
+validate_credentials_raw(Contents) when is_binary(Contents) ->
     try
         _JWT = extract(
             Contents, <<"-----BEGIN NATS USER JWT-----">>, <<"------END NATS USER JWT------">>
@@ -161,14 +186,47 @@ validate_credentials(Contents) when is_binary(Contents) ->
     catch
         error:_ -> {error, invalid_credentials}
     end;
-validate_credentials(_Contents) ->
+validate_credentials_raw(_Contents) ->
     {error, invalid_credentials_type}.
 
 -spec validate_credentials_file(binary() | string()) -> ok | {error, auth_error()}.
 validate_credentials_file(Filename) when is_binary(Filename); is_list(Filename) ->
-    case file:read_file(Filename) of
-        {ok, Contents} -> validate_credentials(Contents);
-        {error, Reason} -> {error, {credentials_file, Reason}}
+    enats_error:wrap(
+        validate_credentials_file,
+        case valid_filename(Filename) of
+            true ->
+                case file:read_file(Filename) of
+                    {ok, Contents} -> validate_credentials(Contents);
+                    {error, badarg} -> {error, invalid_credentials_type};
+                    {error, Reason} -> {error, {credentials_file, Reason}}
+                end;
+            false ->
+                {error, invalid_credentials_type}
+        end
+    );
+validate_credentials_file(_Filename) ->
+    enats_error:wrap(validate_credentials_file, {error, invalid_credentials_type}).
+
+valid_filename(Filename) when is_binary(Filename) ->
+    byte_size(Filename) > 0 andalso binary:match(Filename, <<0>>) =:= nomatch;
+valid_filename(Filename) when is_list(Filename) ->
+    case flat_charlist(Filename) of
+        true ->
+            valid_charlist_filename(Filename);
+        false ->
+            false
+    end.
+
+flat_charlist([]) -> true;
+flat_charlist([Codepoint | Rest]) when is_integer(Codepoint) -> flat_charlist(Rest);
+flat_charlist(_) -> false.
+
+valid_charlist_filename(Filename) ->
+    try unicode:characters_to_binary(Filename) of
+        Path when is_binary(Path) -> valid_filename(Path);
+        _ -> false
+    catch
+        error:badarg -> false
     end.
 
 -spec encode_nkey_public(binary()) -> binary().
@@ -185,7 +243,9 @@ nkey_signer(_PublicKey, PrivateKey) when is_binary(PrivateKey), byte_size(Privat
     end.
 
 -spec from_seed(binary()) -> {ok, binary(), fun((binary()) -> binary())} | {error, auth_error()}.
-from_seed(Seed0) when is_binary(Seed0) ->
+from_seed(Seed0) -> enats_error:wrap(from_seed, from_seed_raw(Seed0)).
+
+from_seed_raw(Seed0) when is_binary(Seed0) ->
     try
         {_UserPrefix, Seed} = decode_seed(Seed0),
         {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
@@ -193,10 +253,14 @@ from_seed(Seed0) when is_binary(Seed0) ->
         {ok, Public, nkey_signer(Public, Seed)}
     catch
         _:_ -> {error, invalid_nkey_seed}
-    end.
+    end;
+from_seed_raw(_Seed) ->
+    {error, invalid_secret_type}.
 
 -spec sign_seed(binary(), binary()) -> {ok, binary(), binary()} | {error, auth_error()}.
-sign_seed(Seed0, Nonce) when is_binary(Seed0), is_binary(Nonce) ->
+sign_seed(Seed0, Nonce) -> enats_error:wrap(sign_seed, sign_seed_raw(Seed0, Nonce)).
+
+sign_seed_raw(Seed0, Nonce) when is_binary(Seed0), is_binary(Nonce) ->
     try
         {_UserPrefix, Seed} = decode_seed(Seed0),
         {PublicKey, _Private} = crypto:generate_key(eddsa, ed25519, Seed),
@@ -205,21 +269,28 @@ sign_seed(Seed0, Nonce) when is_binary(Seed0), is_binary(Nonce) ->
         {ok, Public, base64url(Signature)}
     catch
         _:_ -> {error, invalid_nkey_seed}
-    end.
+    end;
+sign_seed_raw(Seed, _Nonce) when not is_binary(Seed) ->
+    {error, invalid_secret_type};
+sign_seed_raw(_Seed, _Nonce) ->
+    {error, {invalid, nonce, bad_type}}.
 
 -spec resolve_secret(secret_provider(binary())) -> {ok, binary()} | {error, auth_error()}.
-resolve_secret(Fun) when is_function(Fun, 0) ->
+resolve_secret(Provider) -> enats_error:wrap(resolve_secret, resolve_secret_raw(Provider)).
+
+resolve_secret_raw(Fun) when is_function(Fun, 0) ->
     try Fun() of
         {ok, Value} when is_binary(Value) -> {ok, Value};
+        {error, {credentials_file, _} = FileError} -> {error, FileError};
         {error, _} -> {error, secret_provider_failed};
         Value when is_binary(Value) -> {ok, Value};
         _ -> {error, invalid_secret_type}
     catch
         _:_ -> {error, secret_provider_failed}
     end;
-resolve_secret(Value) when is_binary(Value) ->
+resolve_secret_raw(Value) when is_binary(Value) ->
     {ok, Value};
-resolve_secret(_Value) ->
+resolve_secret_raw(_Value) ->
     {error, invalid_secret_type}.
 
 -spec redact(redactable()) -> redactable().
