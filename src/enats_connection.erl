@@ -714,13 +714,19 @@ reconnecting(state_timeout, reconnect, State) ->
                             {state_timeout, attempt_timeout(State1), connect_timeout}
                         ]};
                 {error, Reason, State1} ->
-                    NextState = State1#{
-                        reconnect_attempt => maps:get(reconnect_attempt, State1, 0) + 1,
-                        last_error => enats_error:normalize(connect, Reason)
-                    },
-                    {keep_state, NextState, [
-                        {state_timeout, reconnect_delay(NextState), reconnect}
-                    ]}
+                    FailedState = State1#{last_error => enats_error:normalize(connect, Reason)},
+                    case local_connect_error(Reason) of
+                        true ->
+                            notify(FailedState, disconnected, maps:get(last_error, FailedState)),
+                            {next_state, disconnected, clear_socket(FailedState), []};
+                        false ->
+                            NextState = FailedState#{
+                                reconnect_attempt => maps:get(reconnect_attempt, FailedState, 0) + 1
+                            },
+                            {keep_state, NextState, [
+                                {state_timeout, reconnect_delay(NextState), reconnect}
+                            ]}
+                    end
             end
     end;
 reconnecting({call, From}, status, _State) ->

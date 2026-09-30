@@ -1750,6 +1750,26 @@ t_connection_errors(_Config) ->
     ),
     ?assertEqual({"127.0.0.1", 1}, maps:get(current_server, enats_client:stats(TlsClient))),
     ok = enats_client:stop(TlsClient),
+    {ok, ReconnectClient} = enats_client:start_link(#{
+        servers => [{"127.0.0.1", 1}, {"127.0.0.1", 2}],
+        tls => true,
+        tls_handshake => first,
+        ssl_opts => [{bad_option, true}],
+        reconnect => #{min_delay => 10, max_delay => 10, max_attempts => 1, jitter => 0.0},
+        owner => self()
+    }),
+    {disconnected, ReconnectState} = sys:get_state(ReconnectClient),
+    {next_state, disconnected, FailedState, []} = enats_connection:reconnecting(
+        state_timeout, reconnect, ReconnectState
+    ),
+    ExpectedSslError = expected_badarg(ssl_opts, bad_value),
+    ?assertEqual(ExpectedSslError, maps:get(last_error, FailedState)),
+    Self = self(),
+    receive
+        {enats_client, Self, disconnected, ExpectedSslError} -> ok
+    after 1000 -> ct:fail(local_ssl_error_did_not_stop_reconnect)
+    end,
+    ok = enats_client:stop(ReconnectClient),
     {ok, BinaryHostClient} = enats_client:start_link(#{host => <<"127.0.0.1">>, port => 1}),
     ?assertMatch(
         {error, #{reason := connection_failed}}, enats_client:connect(BinaryHostClient)
